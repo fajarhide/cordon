@@ -112,10 +112,18 @@ fn apply_limits(cmd: &mut Command, job: &Job) {
     }
 }
 
+/// The rlimit resource constants are `c_int` on macOS and the BSDs and
+/// `__rlimit_resource_t`, a u32, on glibc. The signature follows the platform
+/// rather than picking one and casting, so the call sites below stay plain.
+#[cfg(target_env = "gnu")]
+type Resource = libc::__rlimit_resource_t;
+#[cfg(not(target_env = "gnu"))]
+type Resource = libc::c_int;
+
 /// RLIMIT_CPU is fixed at 60s rather than derived from wall_ms: a job can be
 /// slow on IO without burning CPU, and killing it for that would be wrong. The
 /// wall clock is the limit the request controls.
-unsafe fn set(resource: libc::c_int, value: u64) {
+unsafe fn set(resource: Resource, value: u64) {
     let rl = libc::rlimit {
         rlim_cur: value as libc::rlim_t,
         rlim_max: value as libc::rlim_t,
