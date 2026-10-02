@@ -146,7 +146,7 @@ async fn docker_reachable() -> Result<(), ExecError> {
         .stderr(Stdio::null())
         .status();
 
-    match tokio::time::timeout(Duration::from_secs(3), probe).await {
+    match tokio::time::timeout(Duration::from_secs(10), probe).await {
         Ok(Ok(s)) if s.success() => Ok(()),
         Ok(Ok(s)) => Err(ExecError::BackendUnavailable(format!(
             "docker is installed but not answering (exit {})",
@@ -180,6 +180,22 @@ mod tests {
             },
             egress: vec![],
         }
+    }
+
+    /// A live container test skips on a laptop with no docker and fails where
+    /// docker is supposed to be there. Deciding it inside the test means CI
+    /// needs no second cargo run and no grep over its output, which is how the
+    /// previous version of this check went flaky.
+    async fn docker_or_skip(test: &str) -> bool {
+        if docker_reachable().await.is_ok() {
+            return true;
+        }
+        assert!(
+            std::env::var("CORDON_REQUIRE_DOCKER").is_err(),
+            "{test}: CORDON_REQUIRE_DOCKER is set but the docker probe failed"
+        );
+        eprintln!("SKIPPED {test}: no docker here");
+        false
     }
 
     fn joined(j: &Job) -> String {
@@ -289,8 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_a_real_container_when_docker_is_present() {
-        if docker_reachable().await.is_err() {
-            eprintln!("SKIPPED runs_a_real_container_when_docker_is_present: no docker here");
+        if !docker_or_skip("runs_a_real_container_when_docker_is_present").await {
             return;
         }
         let ws = std::env::temp_dir().join(format!("cordon-ctr-{}", std::process::id()));
@@ -319,8 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_container_has_no_network_unless_asked() {
-        if docker_reachable().await.is_err() {
-            eprintln!("SKIPPED a_container_has_no_network_unless_asked: no docker here");
+        if !docker_or_skip("a_container_has_no_network_unless_asked").await {
             return;
         }
         let ws = std::env::temp_dir().join(format!("cordon-ctr-net-{}", std::process::id()));
