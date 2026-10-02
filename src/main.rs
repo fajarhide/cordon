@@ -1,6 +1,11 @@
-#![forbid(unsafe_code)]
+// deny rather than forbid: exec/process.rs needs exactly one unsafe block for
+// setrlimit between fork and exec, and forbid cannot be overridden where it is
+// genuinely required. Every other module inherits the deny.
+#![deny(unsafe_code)]
 
 mod artifact;
+mod exec;
+mod run;
 mod config;
 mod resolve;
 #[cfg(test)]
