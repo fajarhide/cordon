@@ -9,7 +9,6 @@
 //! separate pid namespace. It is the backend for a 1 GB VPS running code you
 //! wrote. Code you did not write belongs in the container backend.
 
-use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 

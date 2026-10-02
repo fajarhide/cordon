@@ -9,6 +9,8 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Only the tests need this list, to clear the environment between cases.
+#[cfg(test)]
 pub const KEYS: &[&str] = &[
     "CORDON_ROOT",
     "CORDON_LISTEN",

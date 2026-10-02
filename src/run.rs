@@ -45,13 +45,10 @@ pub async fn handler(
     let limits = clamp_limits(&cfg, req.limits)?;
     let backend = pick_backend(&cfg, req.backend.as_deref())?;
 
-    // Collect patterns are checked before the job runs, so a job never does
-    // work only to be told afterwards that its output was unreachable.
-    let guard = Guard::new(&cfg.root, &owner, req.inherit);
-    for pattern in &req.collect {
-        check_pattern(&guard, pattern)?;
-    }
-
+    // The workspace is created first. The guard resolves a path against the
+    // real filesystem, so checking a pattern before the workspace exists
+    // refuses every first-time owner: the parent it would canonicalise is not
+    // there yet.
     let workspace = owner.dir(&cfg.root);
     std::fs::create_dir_all(&workspace).map_err(|e| {
         ApiError::new(
@@ -60,6 +57,13 @@ pub async fn handler(
             e.to_string(),
         )
     })?;
+
+    // Collect patterns are checked before the job runs, so a job never does
+    // work only to be told afterwards that its output was unreachable.
+    let guard = Guard::new(&cfg.root, &owner, req.inherit);
+    for pattern in &req.collect {
+        check_pattern(&guard, pattern)?;
+    }
 
     let outcome = backend
         .run(Job {
@@ -340,6 +344,25 @@ mod tests {
         let (status, body) = post(&f, "/v1/run", payload).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(f.cfg.root.join("owners/acme/brandnew").is_dir());
+    }
+
+    /// Caught by an end to end run, not by the suite: the collect check used to
+    /// run before the workspace existed, so a first-time owner with any
+    /// pattern containing a directory was always refused.
+    #[tokio::test]
+    async fn a_brand_new_owner_can_collect_from_a_directory_the_job_creates() {
+        let f = fixture("run-newowner-collect");
+        let payload = r#"{"owner":["acme","firstrun"],"entrypoint":"sh",
+            "args":["-c","mkdir -p out; printf hi > out/r.txt"],
+            "collect":["out/*"],
+            "limits":{"wall_ms":5000,"memory_mb":128,"stdout_kb":64}}"#;
+        let (status, body) = post(&f, "/v1/run", payload).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["artifacts"].as_array().unwrap().len(),
+            1,
+            "nothing collected: {body}"
+        );
     }
 
     #[tokio::test]

@@ -8,7 +8,9 @@ mod exec;
 mod fork;
 mod run;
 mod config;
+mod demo;
 mod resolve;
+mod verify;
 #[cfg(test)]
 mod testsupport;
 mod guard;
@@ -30,6 +32,27 @@ async fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("serve") => serve().await,
+        Some("verify") => {
+            let addr = args.get(1).cloned().unwrap_or_else(|| "http://127.0.0.1:7777".into());
+            match verify::run(&addr).await {
+                Err(e) => Err(e),
+                Ok(checks) => {
+                    if verify::report(&checks, &mut std::io::stdout()) {
+                        Ok(())
+                    } else {
+                        return std::process::ExitCode::FAILURE;
+                    }
+                }
+            }
+        }
+        Some("demo") => {
+            let root = std::env::temp_dir().join(format!("cordon-demo-{}", std::process::id()));
+            match demo::run(&root, &mut std::io::stdout()) {
+                Ok(true) => Ok(()),
+                Ok(false) => return std::process::ExitCode::FAILURE,
+                Err(e) => Err(e.to_string()),
+            }
+        }
         Some("-h") | Some("--help") | Some("help") => {
             print!("{USAGE}");
             return std::process::ExitCode::SUCCESS;
