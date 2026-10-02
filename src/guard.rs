@@ -44,11 +44,19 @@ impl Guard {
         let base = owner.dir(root);
         let own = canonical_or_literal(&base);
         let ancestors = if inherit {
-            owner.ancestors().iter().map(|a| canonical_or_literal(&a.dir(root))).collect()
+            owner
+                .ancestors()
+                .iter()
+                .map(|a| canonical_or_literal(&a.dir(root)))
+                .collect()
         } else {
             Vec::new()
         };
-        Guard { own, ancestors, base }
+        Guard {
+            own,
+            ancestors,
+            base,
+        }
     }
 
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, GuardError> {
@@ -160,15 +168,19 @@ mod tests {
     fn fixture(tag: &str) -> Fixture {
         let tmp = TempRoot::new(tag);
         let root = tmp.0.clone();
-        let budi =
-            Owner::parse(&["acme".into(), "legal".into(), "budi".into()]).unwrap();
+        let budi = Owner::parse(&["acme".into(), "legal".into(), "budi".into()]).unwrap();
         let ani = Owner::parse(&["acme".into(), "legal".into(), "ani".into()]).unwrap();
         for o in [&budi, &ani] {
             fs::create_dir_all(o.dir(&root)).unwrap();
         }
         fs::write(ani.dir(&root).join("secret.md"), b"hers").unwrap();
         fs::write(budi.dir(&root).join("notes.md"), b"mine").unwrap();
-        Fixture { _tmp: tmp, root, budi, ani }
+        Fixture {
+            _tmp: tmp,
+            root,
+            budi,
+            ani,
+        }
     }
 
     #[test]
@@ -202,7 +214,10 @@ mod tests {
             ("backslash as a separator", "..\\ani\\secret.md"),
         ];
         for (name, rel) in attacks {
-            assert!(g.resolve(rel).is_err(), "{name}: resolve({rel:?}) was allowed");
+            assert!(
+                g.resolve(rel).is_err(),
+                "{name}: resolve({rel:?}) was allowed"
+            );
         }
     }
 
@@ -229,7 +244,10 @@ mod tests {
         fs::write(legal.parent().unwrap().join("acme.md"), b"corp").unwrap();
 
         let g = Guard::new(&f.root, &f.budi, true);
-        assert!(g.resolve("../team.md").is_ok(), "inherit must reach the parent");
+        assert!(
+            g.resolve("../team.md").is_ok(),
+            "inherit must reach the parent"
+        );
         assert!(
             g.resolve("../../acme.md").is_ok(),
             "inherit must reach the grandparent"
@@ -266,13 +284,17 @@ mod tests {
         let f = fixture("noinherit");
         let legal = f.budi.dir(&f.root).parent().unwrap().to_path_buf();
         fs::write(legal.join("team.md"), b"ours").unwrap();
-        assert!(Guard::new(&f.root, &f.budi, false).resolve("../team.md").is_err());
+        assert!(Guard::new(&f.root, &f.budi, false)
+            .resolve("../team.md")
+            .is_err());
     }
 
     #[test]
     fn an_absolute_path_is_its_own_error_code() {
         let f = fixture("abs");
-        let err = Guard::new(&f.root, &f.budi, false).resolve("/etc/passwd").unwrap_err();
+        let err = Guard::new(&f.root, &f.budi, false)
+            .resolve("/etc/passwd")
+            .unwrap_err();
         assert!(matches!(err, GuardError::Absolute(_)), "got {err:?}");
     }
 
@@ -289,8 +311,7 @@ mod tests {
         assert!(g.resolve("later").is_ok());
 
         // The job now plants a symlink at exactly that name.
-        std::os::unix::fs::symlink(f.ani.dir(&f.root), f.budi.dir(&f.root).join("later"))
-            .unwrap();
+        std::os::unix::fs::symlink(f.ani.dir(&f.root), f.budi.dir(&f.root).join("later")).unwrap();
 
         assert!(
             g.resolve("later/secret.md").is_err(),

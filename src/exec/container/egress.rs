@@ -64,7 +64,10 @@ fn parse_one(entry: &str) -> Result<Entry, String> {
     if port == 0 {
         return Err(format!("egress entry {entry:?} has port 0"));
     }
-    Ok(Entry { host: host.to_string(), port })
+    Ok(Entry {
+        host: host.to_string(),
+        port,
+    })
 }
 
 /// An allowlist again, not a blocklist. A host made only of letters, digits,
@@ -74,7 +77,8 @@ fn is_hostname(h: &str) -> bool {
         && h.len() <= 253
         && !h.starts_with('-')
         && !h.starts_with('.')
-        && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && h.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 #[cfg(test)]
@@ -128,7 +132,9 @@ mod tests {
 
     #[test]
     fn an_allowlist_does_not_leave_the_container_on_the_none_network() {
-        let a = args(&["litellm.internal:4000".to_string()]).unwrap().join(" ");
+        let a = args(&["litellm.internal:4000".to_string()])
+            .unwrap()
+            .join(" ");
         assert!(
             !a.contains("--network none"),
             "an allowlisted job got no network at all: {a}"
@@ -145,7 +151,10 @@ mod tests {
         .join(" ");
         assert!(a.contains("--add-host litellm.internal:"), "{a}");
         assert!(a.contains("--add-host api.example.com:"), "{a}");
-        assert!(a.contains("--dns 0.0.0.0"), "the resolver was left open: {a}");
+        assert!(
+            a.contains("--dns 0.0.0.0"),
+            "the resolver was left open: {a}"
+        );
     }
 
     #[test]

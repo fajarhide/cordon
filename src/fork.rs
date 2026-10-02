@@ -55,10 +55,16 @@ pub async fn handler(
         // A half copied destination is worse than none: it looks like a
         // finished fork to the next caller.
         let _ = std::fs::remove_dir_all(&dst);
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "fork_failed", e.to_string())
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fork_failed",
+            e.to_string(),
+        )
     })?;
 
-    Ok(Json(json!({ "forked": to.to_string(), "skipped_links": skipped })))
+    Ok(Json(
+        json!({ "forked": to.to_string(), "skipped_links": skipped }),
+    ))
 }
 
 /// Copies a directory tree, returning how many symlinks were left behind.
@@ -94,14 +100,21 @@ mod tests {
     #[tokio::test]
     async fn copies_a_workspace_to_a_new_owner() {
         let f = fixture("fork-ok");
-        let (status, body) =
-            post(&f, "/v1/fork", r#"{"from":["acme","budi"],"to":["acme","copy"]}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/fork",
+            r#"{"from":["acme","budi"],"to":["acme","copy"]}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             std::fs::read(f.cfg.root.join("owners/acme/copy/notes.md")).unwrap(),
             b"mine"
         );
-        assert!(f.cfg.root.join("owners/acme/budi/notes.md").exists(), "source changed");
+        assert!(
+            f.cfg.root.join("owners/acme/budi/notes.md").exists(),
+            "source changed"
+        );
     }
 
     #[tokio::test]
@@ -109,8 +122,12 @@ mod tests {
         let f = fixture("fork-nested");
         std::fs::create_dir_all(f.cfg.root.join("owners/acme/budi/a/b")).unwrap();
         std::fs::write(f.cfg.root.join("owners/acme/budi/a/b/deep.txt"), b"deep").unwrap();
-        let (status, body) =
-            post(&f, "/v1/fork", r#"{"from":["acme","budi"],"to":["acme","copy2"]}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/fork",
+            r#"{"from":["acme","budi"],"to":["acme","copy2"]}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             std::fs::read(f.cfg.root.join("owners/acme/copy2/a/b/deep.txt")).unwrap(),
@@ -121,8 +138,12 @@ mod tests {
     #[tokio::test]
     async fn never_overwrites_an_existing_workspace() {
         let f = fixture("fork-exists");
-        let (status, body) =
-            post(&f, "/v1/fork", r#"{"from":["acme","budi"],"to":["acme","ani"]}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/fork",
+            r#"{"from":["acme","budi"],"to":["acme","ani"]}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "destination_exists", "{body}");
         assert_eq!(
@@ -140,8 +161,12 @@ mod tests {
             f.cfg.root.join("owners/acme/budi/peek"),
         )
         .unwrap();
-        let (status, body) =
-            post(&f, "/v1/fork", r#"{"from":["acme","budi"],"to":["acme","copy3"]}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/fork",
+            r#"{"from":["acme","budi"],"to":["acme","copy3"]}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(
             !f.cfg.root.join("owners/acme/copy3/peek").exists(),
@@ -153,8 +178,12 @@ mod tests {
     #[tokio::test]
     async fn a_missing_source_is_404() {
         let f = fixture("fork-nosource");
-        let (status, body) =
-            post(&f, "/v1/fork", r#"{"from":["acme","ghost"],"to":["acme","copy4"]}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/fork",
+            r#"{"from":["acme","ghost"],"to":["acme","copy4"]}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
 
@@ -174,8 +203,12 @@ mod tests {
     #[tokio::test]
     async fn forking_onto_itself_is_a_conflict_not_a_loop() {
         let f = fixture("fork-self");
-        let (status, _) =
-            post(&f, "/v1/fork", r#"{"from":["acme","budi"],"to":["acme","budi"]}"#).await;
+        let (status, _) = post(
+            &f,
+            "/v1/fork",
+            r#"{"from":["acme","budi"],"to":["acme","budi"]}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
     }
 }

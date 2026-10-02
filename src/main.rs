@@ -4,18 +4,18 @@
 #![deny(unsafe_code)]
 
 mod artifact;
-mod exec;
-mod fork;
-mod run;
 mod config;
 mod demo;
+mod exec;
+mod fork;
+mod guard;
+mod http;
+mod owner;
 mod resolve;
-mod verify;
+mod run;
 #[cfg(test)]
 mod testsupport;
-mod guard;
-mod owner;
-mod http;
+mod verify;
 
 use std::sync::Arc;
 
@@ -33,7 +33,10 @@ async fn main() -> std::process::ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("serve") => serve().await,
         Some("verify") => {
-            let addr = args.get(1).cloned().unwrap_or_else(|| "http://127.0.0.1:7777".into());
+            let addr = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "http://127.0.0.1:7777".into());
             match verify::run(&addr).await {
                 Err(e) => Err(e),
                 Ok(checks) => {
@@ -97,6 +100,9 @@ async fn serve() -> Result<(), String> {
             .map_err(|e| format!("bind {addr}: {e}"))?;
         axum::serve(listener, app).await.map_err(|e| e.to_string())
     } else {
-        Err(format!("CORDON_LISTEN={:?} must start with unix: or tcp:", cfg.listen))
+        Err(format!(
+            "CORDON_LISTEN={:?} must start with unix: or tcp:",
+            cfg.listen
+        ))
     }
 }

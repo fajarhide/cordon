@@ -68,12 +68,19 @@ mod tests {
     #[tokio::test]
     async fn resolves_a_file_the_owner_owns() {
         let f = fixture("resolve-ok");
-        let (status, body) =
-            post(&f, "/v1/resolve", r#"{"owner":["acme","budi"],"path":"notes.md"}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/resolve",
+            r#"{"owner":["acme","budi"],"path":"notes.md"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["exists"], true);
         assert!(
-            body["resolved"].as_str().unwrap().ends_with("/acme/budi/notes.md"),
+            body["resolved"]
+                .as_str()
+                .unwrap()
+                .ends_with("/acme/budi/notes.md"),
             "{body}"
         );
     }
@@ -81,8 +88,12 @@ mod tests {
     #[tokio::test]
     async fn reports_a_path_that_does_not_exist_yet_without_refusing_it() {
         let f = fixture("resolve-new");
-        let (status, body) =
-            post(&f, "/v1/resolve", r#"{"owner":["acme","budi"],"path":"new.txt"}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/resolve",
+            r#"{"owner":["acme","budi"],"path":"new.txt"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["exists"], false);
     }
@@ -124,7 +135,10 @@ mod tests {
         let f = fixture("resolve-junk");
         for payload in ["not json", "{}", r#"{"owner":"acme"}"#, "[]", ""] {
             let (status, body) = post(&f, "/v1/resolve", payload).await;
-            assert!(status.is_client_error(), "{payload:?} gave {status}: {body}");
+            assert!(
+                status.is_client_error(),
+                "{payload:?} gave {status}: {body}"
+            );
         }
     }
 

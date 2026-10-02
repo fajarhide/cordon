@@ -25,9 +25,14 @@ fn the_daemon_stays_under_twenty_megabytes_while_serving() {
     for _ in 0..50 {
         let _ = Command::new("curl")
             .args([
-                "-s", "-X", "POST", "http://127.0.0.1:7791/v1/resolve",
-                "-H", "content-type: application/json",
-                "-d", r#"{"owner":["foot","print"],"path":"a.md"}"#,
+                "-s",
+                "-X",
+                "POST",
+                "http://127.0.0.1:7791/v1/resolve",
+                "-H",
+                "content-type: application/json",
+                "-d",
+                r#"{"owner":["foot","print"],"path":"a.md"}"#,
             ])
             .stdout(Stdio::null())
             .status();
@@ -47,7 +52,10 @@ fn the_daemon_stays_under_twenty_megabytes_while_serving() {
         .parse()
         .expect("ps printed a number");
 
-    assert!(rss_kb > 0, "ps reported nothing, the daemon was not running");
+    assert!(
+        rss_kb > 0,
+        "ps reported nothing, the daemon was not running"
+    );
     assert!(
         rss_kb < 20 * 1024,
         "the daemon used {rss_kb} KB while serving, the spec promises under 20 MB"

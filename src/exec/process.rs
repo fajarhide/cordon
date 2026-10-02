@@ -142,7 +142,11 @@ mod tests {
             entrypoint: "sh".into(),
             args: vec!["-c".into(), script.into()],
             stdin: String::new(),
-            limits: Limits { wall_ms: 5_000, memory_mb: 256, stdout_kb: 64 },
+            limits: Limits {
+                wall_ms: 5_000,
+                memory_mb: 256,
+                stdout_kb: 64,
+            },
             egress: vec![],
         }
     }
@@ -161,7 +165,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_nonzero_exit_is_a_result_not_an_error() {
-        let out = Backend::Process.run(job(tmp("exit"), "exit 3")).await.unwrap();
+        let out = Backend::Process
+            .run(job(tmp("exit"), "exit 3"))
+            .await
+            .unwrap();
         assert_eq!(out.exit_code, 3);
     }
 
@@ -216,7 +223,10 @@ mod tests {
         for _ in 0..8 {
             let ws = ws.clone();
             set.spawn(async move {
-                Backend::Process.run(job(ws, "printf x >> shared.txt")).await.unwrap()
+                Backend::Process
+                    .run(job(ws, "printf x >> shared.txt"))
+                    .await
+                    .unwrap()
             });
         }
         while let Some(r) = set.join_next().await {

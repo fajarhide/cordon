@@ -29,7 +29,9 @@ impl Owner {
         for s in segments {
             validate(s)?;
         }
-        Ok(Owner { segments: segments.to_vec() })
+        Ok(Owner {
+            segments: segments.to_vec(),
+        })
     }
 
     pub fn dir(&self, root: &Path) -> PathBuf {
@@ -45,7 +47,9 @@ impl Owner {
     pub fn ancestors(&self) -> Vec<Owner> {
         (1..self.segments.len())
             .rev()
-            .map(|i| Owner { segments: self.segments[..i].to_vec() })
+            .map(|i| Owner {
+                segments: self.segments[..i].to_vec(),
+            })
             .collect()
     }
 }
@@ -71,7 +75,9 @@ fn validate(s: &str) -> Result<(), String> {
         return Err("owner segment is empty".into());
     }
     if s.len() > MAX_SEGMENT_LEN {
-        return Err(format!("owner segment is longer than {MAX_SEGMENT_LEN} bytes"));
+        return Err(format!(
+            "owner segment is longer than {MAX_SEGMENT_LEN} bytes"
+        ));
     }
     if s.starts_with('.') {
         return Err(format!("owner segment {s:?} starts with a dot"));

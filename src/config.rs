@@ -69,7 +69,10 @@ impl Config {
         let host = split_host(addr)
             .ok_or_else(|| format!("CORDON_LISTEN={:?} is not host:port", self.listen))?;
         let loopback = host == "localhost"
-            || host.parse::<IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false);
+            || host
+                .parse::<IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false);
         if loopback {
             return Ok(());
         }
@@ -93,15 +96,19 @@ fn split_host(addr: &str) -> Option<&str> {
 /// Pulling in a date library to read "24h" is not a trade worth making.
 fn parse_duration(s: &str) -> Result<Duration, String> {
     let (digits, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: u64 = digits
-        .parse()
-        .map_err(|_| format!("CORDON_ARTIFACT_TTL={s:?} is not a number followed by s, m, h or d"))?;
+    let n: u64 = digits.parse().map_err(|_| {
+        format!("CORDON_ARTIFACT_TTL={s:?} is not a number followed by s, m, h or d")
+    })?;
     let secs = match unit {
         "s" => n,
         "m" => n * 60,
         "h" => n * 3600,
         "d" => n * 86_400,
-        _ => return Err(format!("CORDON_ARTIFACT_TTL={s:?} must end in s, m, h or d")),
+        _ => {
+            return Err(format!(
+                "CORDON_ARTIFACT_TTL={s:?} must end in s, m, h or d"
+            ))
+        }
     };
     Ok(Duration::from_secs(secs))
 }
@@ -174,7 +181,10 @@ mod tests {
     #[test]
     fn allows_a_public_listener_once_a_token_is_set() {
         with_env(
-            &[("CORDON_LISTEN", "tcp:0.0.0.0:7777"), ("CORDON_TOKEN", "s3cret")],
+            &[
+                ("CORDON_LISTEN", "tcp:0.0.0.0:7777"),
+                ("CORDON_TOKEN", "s3cret"),
+            ],
             Config::from_env,
         )
         .expect("a token makes a public listener legal");

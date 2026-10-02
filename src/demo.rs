@@ -13,10 +13,8 @@ use crate::guard::{Guard, GuardError};
 use crate::owner::Owner;
 
 pub fn run(root: &Path, out: &mut impl Write) -> std::io::Result<bool> {
-    let a = Owner::parse(&["demo".into(), "owner-a".into()])
-        .map_err(std::io::Error::other)?;
-    let b = Owner::parse(&["demo".into(), "owner-b".into()])
-        .map_err(std::io::Error::other)?;
+    let a = Owner::parse(&["demo".into(), "owner-a".into()]).map_err(std::io::Error::other)?;
+    let b = Owner::parse(&["demo".into(), "owner-b".into()]).map_err(std::io::Error::other)?;
 
     std::fs::create_dir_all(a.dir(root))?;
     std::fs::create_dir_all(b.dir(root))?;
@@ -31,7 +29,10 @@ pub fn run(root: &Path, out: &mut impl Write) -> std::io::Result<bool> {
     writeln!(out, "  root      {}", root.display())?;
     writeln!(out, "  owner a   {a}")?;
     writeln!(out, "  owner b   {b}   holds secret.md")?;
-    writeln!(out, "  planted   a/peek and a/theirs, both symlinks into b\n")?;
+    writeln!(
+        out,
+        "  planted   a/peek and a/theirs, both symlinks into b\n"
+    )?;
 
     let guard = Guard::new(root, &a, false);
 
@@ -120,7 +121,10 @@ mod tests {
             "path_escapes_workspace",
             "absolute_path_rejected",
         ] {
-            assert!(text.contains(want), "demo output is missing {want:?}:\n{text}");
+            assert!(
+                text.contains(want),
+                "demo output is missing {want:?}:\n{text}"
+            );
         }
         let refused = text.matches("refused   ").count();
         assert_eq!(refused, 9, "only {refused} refusals in:\n{text}");

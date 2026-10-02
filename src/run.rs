@@ -103,7 +103,10 @@ fn check_pattern(guard: &Guard, pattern: &str) -> Result<(), ApiError> {
         Some((d, _)) => d,
         None => return Ok(()),
     };
-    guard.resolve(dir).map(|_| ()).map_err(|e| guard_error(e, pattern))
+    guard
+        .resolve(dir)
+        .map(|_| ())
+        .map_err(|e| guard_error(e, pattern))
 }
 
 /// A request may lower a limit and may never raise it past the operator's
@@ -126,7 +129,11 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
         })));
     }
     Ok(Limits {
-        stdout_kb: if l.stdout_kb == 0 { 256 } else { l.stdout_kb.min(4096) },
+        stdout_kb: if l.stdout_kb == 0 {
+            256
+        } else {
+            l.stdout_kb.min(4096)
+        },
         ..l
     })
 }
@@ -134,7 +141,9 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
 fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> {
     match asked.unwrap_or(&cfg.backend) {
         "process" => Ok(Backend::Process),
-        "container" => Ok(Backend::Container { image: cfg.image.clone() }),
+        "container" => Ok(Backend::Container {
+            image: cfg.image.clone(),
+        }),
         other => Err(ApiError::bad_request(
             "invalid_request",
             format!("backend {other:?} is not process or container"),
@@ -167,14 +176,18 @@ fn collect(
     let mut out = Vec::new();
     for pattern in patterns {
         for path in glob(workspace, pattern) {
-            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
             if !meta.is_file() {
                 continue;
             }
             // The job may have written a symlink pointing out of the
             // workspace. Collecting it would mint a token for someone else's
             // file, so the resolved target is checked, not the name.
-            let Ok(real) = std::fs::canonicalize(&path) else { continue };
+            let Ok(real) = std::fs::canonicalize(&path) else {
+                continue;
+            };
             if !real.starts_with(&real_ws) {
                 continue;
             }
@@ -201,7 +214,11 @@ fn collect(
 /// token gets minted for, is more surface than the feature is worth.
 fn glob(workspace: &Path, pattern: &str) -> Vec<PathBuf> {
     let (dir, name) = pattern.rsplit_once('/').unwrap_or(("", pattern));
-    let base = if dir.is_empty() { workspace.to_path_buf() } else { workspace.join(dir) };
+    let base = if dir.is_empty() {
+        workspace.to_path_buf()
+    } else {
+        workspace.join(dir)
+    };
     match name.strip_suffix('*') {
         None => {
             let p = base.join(name);
@@ -212,7 +229,9 @@ fn glob(workspace: &Path, pattern: &str) -> Vec<PathBuf> {
             }
         }
         Some(prefix) => {
-            let Ok(entries) = std::fs::read_dir(&base) else { return vec![] };
+            let Ok(entries) = std::fs::read_dir(&base) else {
+                return vec![];
+            };
             let mut v: Vec<PathBuf> = entries
                 .flatten()
                 .map(|e| e.path())
@@ -307,8 +326,12 @@ mod tests {
     #[tokio::test]
     async fn limits_are_optional_and_default_inside_the_ceiling() {
         let f = fixture("run-default-limits");
-        let (status, body) =
-            post(&f, "/v1/run", r#"{"owner":["acme","budi"],"entrypoint":"true"}"#).await;
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","budi"],"entrypoint":"true"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
@@ -319,7 +342,10 @@ mod tests {
             "limits":{"wall_ms":1000,"memory_mb":64,"stdout_kb":8}}"#;
         let (status, body) = post(&f, "/v1/run", payload).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert_eq!(body["error"]["code"], "backend_cannot_honour_request", "{body}");
+        assert_eq!(
+            body["error"]["code"], "backend_cannot_honour_request",
+            "{body}"
+        );
     }
 
     #[tokio::test]

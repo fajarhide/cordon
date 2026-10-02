@@ -132,8 +132,12 @@ async fn docker_reachable() -> Result<(), ExecError> {
             "docker is installed but not answering (exit {})",
             s.code().unwrap_or(-1)
         ))),
-        Ok(Err(e)) => Err(ExecError::BackendUnavailable(format!("docker not runnable: {e}"))),
-        Err(_) => Err(ExecError::BackendUnavailable("docker did not answer in 3s".into())),
+        Ok(Err(e)) => Err(ExecError::BackendUnavailable(format!(
+            "docker not runnable: {e}"
+        ))),
+        Err(_) => Err(ExecError::BackendUnavailable(
+            "docker did not answer in 3s".into(),
+        )),
     }
 }
 
@@ -149,7 +153,11 @@ mod tests {
             entrypoint: "sh".into(),
             args: vec!["-c".into(), script.into()],
             stdin: String::new(),
-            limits: Limits { wall_ms: 20_000, memory_mb: 128, stdout_kb: 64 },
+            limits: Limits {
+                wall_ms: 20_000,
+                memory_mb: 128,
+                stdout_kb: 64,
+            },
             egress: vec![],
         }
     }
@@ -230,12 +238,17 @@ mod tests {
         // same way on a machine that has no docker binary at all.
         let saved = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", "/nonexistent");
-        let err = Backend::Container { image: "alpine:3.20".into() }
-            .run(job("true"))
-            .await
-            .expect_err("must refuse when docker is unreachable");
+        let err = Backend::Container {
+            image: "alpine:3.20".into(),
+        }
+        .run(job("true"))
+        .await
+        .expect_err("must refuse when docker is unreachable");
         std::env::set_var("PATH", saved);
-        assert!(matches!(err, ExecError::BackendUnavailable(_)), "got {err:?}");
+        assert!(
+            matches!(err, ExecError::BackendUnavailable(_)),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -249,7 +262,12 @@ mod tests {
         let mut j = job("printf hi > out.txt; echo done");
         j.workspace = ws.clone();
 
-        let out = Backend::Container { image: "alpine:3.20".into() }.run(j).await.unwrap();
+        let out = Backend::Container {
+            image: "alpine:3.20".into(),
+        }
+        .run(j)
+        .await
+        .unwrap();
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
         assert_eq!(out.stdout.trim(), "done");
         assert_eq!(std::fs::read(ws.join("out.txt")).unwrap(), b"hi");
@@ -266,7 +284,12 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let mut j = job("wget -q -T 3 -O - https://example.com || echo BLOCKED");
         j.workspace = ws.clone();
-        let out = Backend::Container { image: "alpine:3.20".into() }.run(j).await.unwrap();
+        let out = Backend::Container {
+            image: "alpine:3.20".into(),
+        }
+        .run(j)
+        .await
+        .unwrap();
         assert!(
             out.stdout.contains("BLOCKED"),
             "the container reached the network: {}",

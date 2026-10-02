@@ -51,15 +51,19 @@ pub async fn handler(
 ) -> Result<Response, ApiError> {
     // One refusal for every failure below, so the answer never reveals whether
     // the token existed, belonged to someone else, or had expired.
-    let gone =
-        || ApiError::new(StatusCode::NOT_FOUND, "artifact_not_found", "no such artifact");
+    let gone = || {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            "no such artifact",
+        )
+    };
 
     if !is_token(&token) {
         return Err(gone());
     }
-    let record =
-        std::fs::read_to_string(cfg.root.join("artifacts").join(format!("{token}.rec")))
-            .map_err(|_| gone())?;
+    let record = std::fs::read_to_string(cfg.root.join("artifacts").join(format!("{token}.rec")))
+        .map_err(|_| gone())?;
     let (owner, path, expires) = parse_record(&record).ok_or_else(gone)?;
 
     if now_secs() >= expires {
@@ -79,7 +83,10 @@ pub async fn handler(
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename={name:?}")),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename={name:?}"),
+            ),
         ],
         bytes,
     )
@@ -151,15 +158,18 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_token_is_404() {
         let f = fixture("art-unknown");
-        let (status, _) =
-            get(&f, "/v1/artifact/art_00000000000000000000000000000000").await;
+        let (status, _) = get(&f, "/v1/artifact/art_00000000000000000000000000000000").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn a_token_shaped_path_traversal_is_refused() {
         let f = fixture("art-traverse");
-        for token in ["..%2f..%2fetc%2fpasswd", "....", "art_..%2f..%2fetc%2fpasswd"] {
+        for token in [
+            "..%2f..%2fetc%2fpasswd",
+            "....",
+            "art_..%2f..%2fetc%2fpasswd",
+        ] {
             let (status, _) = get(&f, &format!("/v1/artifact/{token}")).await;
             assert!(status.is_client_error(), "{token} gave {status}");
         }
@@ -168,8 +178,7 @@ mod tests {
     #[tokio::test]
     async fn an_expired_token_is_404() {
         let mut f = fixture("art-expired");
-        Arc::get_mut(&mut f.cfg).expect("sole owner").artifact_ttl =
-            Duration::from_secs(0);
+        Arc::get_mut(&mut f.cfg).expect("sole owner").artifact_ttl = Duration::from_secs(0);
         let file = budi().dir(&f.cfg.root).join("notes.md");
         let token = mint(&f.cfg, &budi(), &file).unwrap();
         std::thread::sleep(Duration::from_millis(1100));
@@ -186,8 +195,7 @@ mod tests {
         let file = budi().dir(&f.cfg.root).join("notes.md");
         let token = mint(&f.cfg, &budi(), &file).unwrap();
 
-        let (wrong, wrong_body) =
-            get(&f, &format!("/v1/artifact/{token}?owner=acme/ani")).await;
+        let (wrong, wrong_body) = get(&f, &format!("/v1/artifact/{token}?owner=acme/ani")).await;
         let (unknown, unknown_body) = get(
             &f,
             "/v1/artifact/art_ffffffffffffffffffffffffffffffff?owner=acme/ani",
@@ -195,7 +203,10 @@ mod tests {
         .await;
 
         assert_eq!(wrong, StatusCode::NOT_FOUND, "another owner got {wrong}");
-        assert_eq!(wrong, unknown, "the status tells a real token from a fake one");
+        assert_eq!(
+            wrong, unknown,
+            "the status tells a real token from a fake one"
+        );
         assert_eq!(
             wrong_body, unknown_body,
             "the body tells a real token from a fake one"
@@ -207,8 +218,7 @@ mod tests {
         let f = fixture("art-right-owner");
         let file = budi().dir(&f.cfg.root).join("notes.md");
         let token = mint(&f.cfg, &budi(), &file).unwrap();
-        let (status, body) =
-            get(&f, &format!("/v1/artifact/{token}?owner=acme/budi")).await;
+        let (status, body) = get(&f, &format!("/v1/artifact/{token}?owner=acme/budi")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, b"mine");
     }

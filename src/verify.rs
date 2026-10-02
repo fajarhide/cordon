@@ -19,15 +19,42 @@ pub struct Check {
 /// Each attempt is a thing a compromised job will actually try. The owner
 /// prefix is `cordon-verify` so a probe never touches a real workspace.
 const ATTEMPTS: &[(&str, &str)] = &[
-    ("parent traversal", r#"{"owner":["cordon-verify","a"],"path":"../b/secret"}"#),
-    ("deep traversal", r#"{"owner":["cordon-verify","a"],"path":"../../../../etc/passwd"}"#),
-    ("absolute path", r#"{"owner":["cordon-verify","a"],"path":"/etc/passwd"}"#),
-    ("percent encoded", r#"{"owner":["cordon-verify","a"],"path":"..%2fb%2fsecret"}"#),
-    ("backslash separator", r#"{"owner":["cordon-verify","a"],"path":"..\\b\\secret"}"#),
-    ("dotdot owner", r#"{"owner":["cordon-verify",".."],"path":"x"}"#),
-    ("separator in owner", r#"{"owner":["cordon-verify","a/b"],"path":"x"}"#),
-    ("non ascii owner", r#"{"owner":["cordon-verify","café"],"path":"x"}"#),
-    ("reach the token store", r#"{"owner":["cordon-verify","a"],"path":"../../artifacts"}"#),
+    (
+        "parent traversal",
+        r#"{"owner":["cordon-verify","a"],"path":"../b/secret"}"#,
+    ),
+    (
+        "deep traversal",
+        r#"{"owner":["cordon-verify","a"],"path":"../../../../etc/passwd"}"#,
+    ),
+    (
+        "absolute path",
+        r#"{"owner":["cordon-verify","a"],"path":"/etc/passwd"}"#,
+    ),
+    (
+        "percent encoded",
+        r#"{"owner":["cordon-verify","a"],"path":"..%2fb%2fsecret"}"#,
+    ),
+    (
+        "backslash separator",
+        r#"{"owner":["cordon-verify","a"],"path":"..\\b\\secret"}"#,
+    ),
+    (
+        "dotdot owner",
+        r#"{"owner":["cordon-verify",".."],"path":"x"}"#,
+    ),
+    (
+        "separator in owner",
+        r#"{"owner":["cordon-verify","a/b"],"path":"x"}"#,
+    ),
+    (
+        "non ascii owner",
+        r#"{"owner":["cordon-verify","café"],"path":"x"}"#,
+    ),
+    (
+        "reach the token store",
+        r#"{"owner":["cordon-verify","a"],"path":"../../artifacts"}"#,
+    ),
 ];
 
 pub async fn run(addr: &str) -> Result<Vec<Check>, String> {
@@ -80,7 +107,9 @@ async fn post(host: &str, path: &str, payload: &str) -> Result<(u16, String), St
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
-    sock.write_all(req.as_bytes()).await.map_err(|e| e.to_string())?;
+    sock.write_all(req.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut raw))
@@ -180,8 +209,16 @@ mod tests {
     #[test]
     fn the_report_says_fail_loudly_and_returns_false() {
         let checks = vec![
-            Check { name: "parent traversal", passed: true, detail: "status 403".into() },
-            Check { name: "absolute path", passed: false, detail: "status 200".into() },
+            Check {
+                name: "parent traversal",
+                passed: true,
+                detail: "status 403".into(),
+            },
+            Check {
+                name: "absolute path",
+                passed: false,
+                detail: "status 200".into(),
+            },
         ];
         let mut out = Vec::new();
         let ok = report(&checks, &mut out);

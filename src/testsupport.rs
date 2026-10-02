@@ -73,7 +73,12 @@ pub async fn post(f: &Fixture, uri: &str, payload: &str) -> (StatusCode, Value) 
 
 pub async fn get(f: &Fixture, uri: &str) -> (StatusCode, Vec<u8>) {
     let res = crate::http::router(Arc::clone(&f.cfg))
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("build request"))
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("build request"),
+        )
         .await
         .expect("router answered");
     let status = res.status();

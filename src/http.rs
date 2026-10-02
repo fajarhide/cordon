@@ -23,7 +23,12 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        ApiError { status, code, message: message.into(), detail: None }
+        ApiError {
+            status,
+            code,
+            message: message.into(),
+            detail: None,
+        }
     }
 
     pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
@@ -52,7 +57,10 @@ impl IntoResponse for ApiError {
 
 pub fn router(cfg: Arc<Config>) -> Router {
     Router::new()
-        .route("/v1/health", get(|| async { Json(json!({ "status": "ok" })) }))
+        .route(
+            "/v1/health",
+            get(|| async { Json(json!({ "status": "ok" })) }),
+        )
         .route("/v1/resolve", post(crate::resolve::handler))
         .route("/v1/run", post(crate::run::handler))
         .route("/v1/fork", post(crate::fork::handler))
@@ -83,7 +91,12 @@ mod tests {
     #[tokio::test]
     async fn health_answers_ok() {
         let res = router(test_config())
-            .oneshot(Request::builder().uri("/v1/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -94,7 +107,12 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_route_is_404_not_a_panic() {
         let res = router(test_config())
-            .oneshot(Request::builder().uri("/v1/nope").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);

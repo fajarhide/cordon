@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the Rust toolchain
+        run: rustup component add clippy rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The runner has docker, so the two container tests that skip on a laptop
+      # actually run here. Pulling the image up front keeps the 20s test
+      # timeout from being spent on a pull.
+      - name: Pull the sandbox image
+        run: docker pull alpine:3.20
+
+      - name: Test
+        run: cargo test -- --nocapture
+
+      - name: Confirm the container tests ran rather than skipped
+        run: |
+          if cargo test --bin cordon exec::container -- --nocapture 2>&1 | grep -q SKIPPED; then
+            echo "A container test skipped on a runner that has docker."
+            exit 1
+          fi
+          echo "Both container tests ran."
+
+  guarantee:
+    name: The guarantee, end to end
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the release binary
+        run: cargo build --release
+
+      - name: Size and dependency count
+        run: |
+          ls -l target/release/cordon | awk '{printf "binary: %.1f MB\n", $5/1048576}'
+          cargo tree --depth 1 --edges normal | tail -n +2 | wc -l | xargs echo "direct dependencies:"
+
+      # No daemon, no docker, no configuration. If this fails the product does
+      # not work, so it runs before anything else is set up.
+      - name: cordon demo
+        run: ./target/release/cordon demo
+
+      - name: Start the daemon
+        run: |
+          mkdir -p /tmp/cordon-ci
+          CORDON_ROOT=/tmp/cordon-ci CORDON_LISTEN=tcp:127.0.0.1:7777 \
+            ./target/release/cordon serve &
+          for _ in $(seq 40); do
+            curl -sf http://127.0.0.1:7777/v1/health >/dev/null && break
+            sleep 0.25
+          done
+          curl -sf http://127.0.0.1:7777/v1/health
+
+      - name: cordon verify
+        run: ./target/release/cordon verify http://127.0.0.1:7777
+
+      - name: A job writes a file and gets a token back
+        run: |
+          set -euo pipefail
+          resp=$(curl -sS -X POST http://127.0.0.1:7777/v1/run \
+            -H 'content-type: application/json' -d '{
+              "owner":["acme","budi"],"entrypoint":"sh",
+              "args":["-c","mkdir -p out; printf hello > out/r.txt; echo done"],
+              "collect":["out/*"],
+              "limits":{"wall_ms":5000,"memory_mb":128,"stdout_kb":64}}')
+          echo "$resp"
+          token=$(echo "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          test -n "$token" || { echo "no token minted"; exit 1; }
+
+          body=$(curl -sS "http://127.0.0.1:7777/v1/artifact/$token")
+          test "$body" = "hello" || { echo "artifact body was $body"; exit 1; }
+
+          # The same token, a different owner. Must be refused, and must look
+          # identical to a token that never existed.
+          wrong=$(curl -sS "http://127.0.0.1:7777/v1/artifact/$token?owner=acme/ani")
+          fake=$(curl -sS "http://127.0.0.1:7777/v1/artifact/art_ffffffffffffffffffffffffffffffff?owner=acme/ani")
+          test "$wrong" = "$fake" || {
+            echo "a wrong-owner refusal is distinguishable from an unknown token"
+            echo "wrong: $wrong"; echo "fake:  $fake"; exit 1; }
+          echo "wrong owner refused, indistinguishable from an unknown token"
+
+      - name: A container job runs with no network
+        run: |
+          set -euo pipefail
+          docker pull -q alpine:3.20
+          resp=$(curl -sS -X POST http://127.0.0.1:7777/v1/run \
+            -H 'content-type: application/json' -d '{
+              "owner":["acme","budi"],"entrypoint":"sh","backend":"container",
+              "args":["-c","wget -q -T 3 -O - https://example.com || echo BLOCKED"],
+              "limits":{"wall_ms":30000,"memory_mb":128,"stdout_kb":64}}')
+          echo "$resp"
+          echo "$resp" | grep -q BLOCKED || {
+            echo "the container reached the network"; exit 1; }
+          echo "container job ran and had no network"
+
+      - name: Footprint while serving
+        run: |
+          rss=$(ps -o rss= -p "$(pgrep -f 'cordon serve' | head -1)" | tr -d ' ')
+          echo "daemon RSS while serving: ${rss} KB"
+          test "$rss" -lt 20480 || { echo "over the 20 MB budget"; exit 1; }
+
+  client:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test
+        working-directory: clients/typescript
+
+  prose:
+    name: No em dashes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Grep every tracked file
+        run: |
+          if git grep -nP '\x{2014}|\x{2013}' -- . ; then
+            echo "An em dash or en dash reached a tracked file."
+            exit 1
+          fi
+          echo "clean"
