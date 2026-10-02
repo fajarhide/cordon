@@ -50,7 +50,7 @@ cargo install --git https://github.com/fajarhide/cordon
 cordon serve
 ```
 
-That is the whole install. 912 KB binary, no runtime, no container needed.
+That is the whole install. A 1.2 MB static binary, six dependencies, no runtime and no container needed.
 
 ## Prove it on your own box
 
