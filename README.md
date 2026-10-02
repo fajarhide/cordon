@@ -1,20 +1,25 @@
 # cordon
 
-Give every user, team and agent its own workspace on disk, and make it
-impossible for one to read another's files. One binary, no KVM, runs on a 1 GB
-VPS.
+**A sandbox per person. One binary, no KVM, no VM, runs on a 1 GB VPS.**
 
-Built for AI agent runtimes, where the model decides which file to open and you
-need that decision to be checked by something the model cannot talk its way
-past.
+cordon gives every user, team and AI agent its own sandbox on disk, and makes it
+impossible for one to reach another's files. The model picks the path; cordon
+decides whether that path was allowed.
 
-## See it refuse
+[![CI](https://github.com/fajarhide/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/fajarhide/cordon/actions/workflows/ci.yml)
 
-One command. No daemon, no Docker, no configuration.
+## Quick start
+
+```bash
+cargo install --git https://github.com/fajarhide/cordon
+cordon demo
+```
+
+`cordon demo` needs no daemon, no Docker and no configuration. It builds two
+sandboxes, plants the traps a real job would plant, and tries to break out of
+one into the other:
 
 ```
-$ cordon demo
-
 cordon demo
   root      /tmp/cordon-demo-72540
   owner a   demo/owner-a
@@ -38,50 +43,178 @@ owner a cannot read owner b, nine ways
 9 of 9 attempts refused
 ```
 
-Owner a has a symlink sitting in its own directory pointing straight at owner
-b's file. It still cannot read it, because cordon resolves the path on the
+Owner a has a symlink sitting in its own sandbox pointing straight at owner b's
+file. It still cannot read it, because cordon resolves the path on the
 filesystem first and judges where it actually landed. Checking the string is
 what symlinks are for.
 
-## Install
+Then run the daemon:
 
-```sh
-cargo install --git https://github.com/fajarhide/cordon
+```bash
 cordon serve
 ```
 
-That is the whole install. A 1.2 MB static binary, six dependencies, no runtime and no container needed.
+A 1.2 MB static binary, six dependencies, no runtime and no container needed.
 
-## Prove it on your own box
+## What is cordon?
 
-`cordon verify` fires the same attacks at a daemon you are already running, so
-you do not have to take this README's word for anything.
+A sandbox harness for the era where software decides which file to open.
 
+Every agent runtime eventually builds this layer, badly, in a hurry. A tool call
+arrives with a path the model chose, and something has to decide whether that
+path belongs to the user whose session it came from. Do it in the application
+and you reimplement it per language, per service, and get it subtly wrong in one
+of them.
+
+cordon is that decision, in one place, behind an HTTP call:
+
+- **A sandbox per owner.** `acme/legal/budi` gets a directory. It is the only one that owner can reach.
+- **One guard.** Every path is resolved on disk and then judged. No string matching, no blocklist.
+- **Two sandbox backends.** A process with rlimits for code you wrote, a locked-down container for code you did not.
+- **Output by token.** A job's files come back as opaque tokens bound to one owner, never as paths.
+- **Proof on demand.** `cordon verify` fires the attacks at your own running daemon and exits non-zero if any of them lands.
+
+It is not a hypervisor and never claims to be. It shares the host kernel, which
+is the trade that lets it run where KVM is not available.
+
+## Why we built cordon
+
+Two measurements, taken on a real client deployment, decided the design.
+
+**The sandbox is not the expensive part.** At 100 concurrent users the sandbox
+runtime came to 0.15% of the monthly bill. The model was 99.85%. Compute inside
+a turn was 0.03% of its wall clock: 8 ms building a spreadsheet against 96
+seconds of model time. So paying for a VM per session buys isolation at a price
+the workload never justified.
+
+**Nested virtualisation was not available anyway.** Not on the VPS, not on the
+dev box, not on any host checked. One provider advertised it; its DMI table said
+KVM while `systemd-detect-virt` said the machine was itself a guest. A design
+that needs `/dev/kvm` is a design that does not deploy.
+
+**And the boundary that mattered was missing.** The agent runtime in use
+guaranteed isolation between organisations and said nothing at all about
+isolation between users inside one. Attachments pooled into a single shared
+directory per agent, 19 MB of it, while the files that genuinely belonged to
+individual users totalled 1.2 MB. Nobody chose that. It was just where the
+default landed.
+
+cordon is what was missing: a per-user boundary that works on a small VPS,
+enforced by something the model cannot argue with.
+
+## Built for teams
+
+- **Ownership is a path, not a flag.** `acme/legal/budi` is one owner, `acme/legal` is another. Your tenancy maps onto it directly: org, team, person; or just a user id.
+- **A member reaches up, never sideways.** With `inherit: true`, an owner sees the files sitting directly in its parent and grandparent sandboxes. A sibling is refused, always, with no list of who the siblings are.
+- **Templates by fork.** `POST /v1/fork` copies a sandbox to a new owner, never overwriting one, and drops symlinks rather than carrying them across an owner boundary.
+- **Per-owner limits with an operator ceiling.** A request may lower a limit and can never raise it past the one the operator set.
+- **Nothing to run per person.** A sandbox is a directory. Ten thousand owners cost ten thousand directories, not ten thousand VMs.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph app["Your application"]
+        RT["Agent runtime or web app<br/>Rails, Express, Django<br/>Nakama, OpenClaw, Hermes"]
+    end
+
+    subgraph d["cordond, one static binary"]
+        direction TB
+        GUARD["<b>The guard</b><br/>resolve on disk, then decide"]
+        PROC["process backend<br/>rlimits, scrubbed env"]
+        CTR["container backend<br/>no network, read-only root"]
+        TOK["artifact tokens<br/>one file, one owner"]
+    end
+
+    subgraph fs["Sandboxes on disk"]
+        direction TB
+        OWN["acme/legal/budi<br/><i>this job's sandbox</i>"]
+        SIB["acme/legal/ani<br/><i>a sibling</i>"]
+    end
+
+    RT -->|"HTTP over a unix socket"| GUARD
+    GUARD --> PROC
+    GUARD --> CTR
+    PROC --> OWN
+    CTR --> OWN
+    OWN --> TOK
+    TOK -->|"token, never a path"| RT
+    GUARD -.->|"refused: path_escapes_workspace"| SIB
 ```
-$ cordon verify http://127.0.0.1:7777
 
-ok   parent traversal         status 403, code path_escapes_workspace
-ok   deep traversal           status 403, code path_escapes_workspace
-ok   absolute path            status 400, code absolute_path_rejected
-ok   percent encoded          status 403, code path_escapes_workspace
-ok   backslash separator      status 403, code path_escapes_workspace
-ok   dotdot owner             status 400, code invalid_owner
-ok   separator in owner       status 400, code invalid_owner
-ok   non ascii owner          status 400, code invalid_owner
-ok   reach the token store    status 403, code path_escapes_workspace
+Four pieces, and only the first one matters:
 
-all 9 checks passed
+- **The guard** (`src/guard.rs`) is the product. It joins the requested path onto the owner's sandbox, resolves the result on the filesystem, and only then decides. It caches nothing, because a job can plant a symlink between two calls.
+- **The backends** (`src/exec/`) run a job. Two of them, picked by who wrote the code being run.
+- **The token store** (`src/artifact.rs`) hands a job's output back without ever handing out a path. A token carries no owner and no path inside it, so one cannot be constructed by guessing a filename.
+- **The clients** (`clients/`) build requests and read answers. They hold no security logic at all, because a rule implemented twice is a rule that drifts.
+
+### How an owner maps onto disk
+
+```mermaid
+flowchart TD
+    ROOT["CORDON_ROOT/owners"] --> ACME["acme"]
+    ACME --> LEGAL["acme/legal"]
+    ACME --> FIN["acme/finance"]
+    LEGAL --> BUDI["acme/legal/budi<br/><b>the job runs here</b>"]
+    LEGAL --> ANI["acme/legal/ani"]
+
+    style BUDI fill:#d4f8d4,stroke:#2d7a2d,stroke-width:2px
+    style ANI fill:#f8d4d4,stroke:#7a2d2d
+    style FIN fill:#f8d4d4,stroke:#7a2d2d
 ```
 
-It exits non-zero on any failure, so it belongs in your deploy pipeline. A 403
-with an empty body does not count as a pass: a check only passes on a 4xx that
-carries a machine readable code.
+A job owned by `acme/legal/budi` reaches everything under the green box. With
+`inherit: true` it also reaches the files sitting directly in `acme/legal` and
+`acme`, and nothing deeper. The red boxes are refused, always.
 
-## The cheapest way to adopt it
+That asymmetry is deliberate. The ownership tree is the directory tree, so every
+subdirectory of `acme/legal` either is or could later become another owner.
+Granting an ancestor's whole subtree would therefore grant the sibling, which is
+the one thing cordon promises not to do.
 
-One endpoint. Ask before you open a file, and you are done.
+## The sandbox
 
-```sh
+What one job gets, and what it does not.
+
+**A filesystem.** Its own sandbox directory, as its working directory and its
+`HOME`. Nothing above it, beside it, or outside the root, however the path is
+spelled.
+
+**A clock and a ceiling.** A wall-clock timeout that takes the whole process
+tree, a memory cap, an output cap that truncates and says so rather than
+buffering a runaway job into the daemon's heap.
+
+**No network, in the container backend.** `--network none` by default. A job that
+needs to reach something names it, host and port, and gets exactly those names
+resolvable and no resolver for anything else.
+
+**No root.** The container backend runs the job as the daemon's own uid, never
+as root, and refuses to run at all if cordon itself is root.
+
+**Output it cannot address.** Files are collected by pattern and handed back as
+tokens. Present a token as a different owner and the answer is byte identical to
+one for a token that never existed, so it does not even confirm the token is
+real.
+
+## API
+
+Five endpoints. You can adopt the first one alone and stop there.
+
+| | |
+| --- | --- |
+| `POST /v1/resolve` | may this owner touch this path, and does it exist |
+| `POST /v1/run` | run a job in the owner's sandbox, collect its output |
+| `GET /v1/artifact/{token}` | fetch one collected file by token |
+| `POST /v1/fork` | copy a sandbox to a new owner, never overwriting |
+| `GET /v1/health` | liveness |
+
+### The cheapest way to adopt it
+
+Ask before you open a file. No job execution, no container, no change to how
+your code reads files.
+
+```bash
 $ curl -s -X POST localhost:7777/v1/resolve -H 'content-type: application/json' \
     -d '{"owner":["acme","budi"],"path":"notes.md"}'
 {"exists":true,"resolved":"/var/lib/cordon/owners/acme/budi/notes.md"}
@@ -92,44 +225,36 @@ $ curl -s -X POST localhost:7777/v1/resolve -H 'content-type: application/json' 
           "message":"the path resolves outside the owner workspace"}}
 ```
 
-No job execution, no container, no change to how your code reads files. You get
-a path back, or a refusal with a code you can branch on.
+### Run a job in a sandbox and get its output back
 
-## Run a job and get its output back
-
-```sh
+```bash
 $ curl -s -X POST localhost:7777/v1/run -H 'content-type: application/json' -d '{
     "owner":["acme","budi"],
     "entrypoint":"sh",
-    "args":["-c","mkdir -p out; printf \"laporan selesai\" > out/report.txt; echo done"],
+    "args":["-c","mkdir -p out; printf hello > out/report.txt; echo done"],
     "collect":["out/*"],
+    "backend":"container",
     "limits":{"wall_ms":5000,"memory_mb":128,"stdout_kb":64}
   }'
-{"artifacts":[{"bytes":15,"path":"out/report.txt",
+{"artifacts":[{"bytes":5,"path":"out/report.txt",
                "token":"art_ca0a49fb851175de1a08cb0dba96ddc2"}],
  "duration_ms":15,"exit_code":0,"stderr":"","stdout":"done\n","truncated":false}
-```
 
-Output comes back as a token, never a path:
-
-```sh
 $ curl -s localhost:7777/v1/artifact/art_ca0a49fb851175de1a08cb0dba96ddc2
-laporan selesai
-```
+hello
 
-Present that same token as a different owner and it is gone, with a response
-byte identical to one for a token that never existed, so the answer does not
-confirm the token is real:
-
-```sh
 $ curl -s 'localhost:7777/v1/artifact/art_ca0a49fb851175de1a08cb0dba96ddc2?owner=acme/ani'
 {"error":{"code":"artifact_not_found","message":"no such artifact"}}
 ```
 
-## Wiring it into an agent runtime
+Every refusal is a 4xx carrying a stable `code`: `invalid_owner`,
+`absolute_path_rejected`, `path_escapes_workspace`, `limit_exceeded`,
+`backend_cannot_honour_request`, `backend_unavailable`, `artifact_not_found`,
+`destination_exists`, `source_not_found`. Only a daemon fault is a 5xx.
 
-The whole integration is one call in front of your file tool. The model picks
-the path; cordon decides whether that path was allowed.
+## Integrating with an agent runtime
+
+The whole integration is one call in front of your file tool.
 
 ```ts
 import { Cordon, CordonError } from "@cordon/client";
@@ -155,81 +280,88 @@ async function readFile(session: Session, path: string) {
 `["org_42", "team_legal", "u_991"]`, a single `["u_991"]`. cordon does not care,
 as long as it is the same array every turn for the same user.
 
+## Prove it on your own box
+
+`cordon verify` fires the same attacks at a daemon you are already running, so
+you do not have to take this README's word for anything. It exits non-zero on
+any failure, which is what makes it belong in a deploy pipeline.
+
+```
+$ cordon verify http://127.0.0.1:7777
+
+ok   parent traversal         status 403, code path_escapes_workspace
+ok   deep traversal           status 403, code path_escapes_workspace
+ok   absolute path            status 400, code absolute_path_rejected
+ok   percent encoded          status 403, code path_escapes_workspace
+ok   backslash separator      status 403, code path_escapes_workspace
+ok   dotdot owner             status 400, code invalid_owner
+ok   separator in owner       status 400, code invalid_owner
+ok   non ascii owner          status 400, code invalid_owner
+ok   reach the token store    status 403, code path_escapes_workspace
+
+all 9 checks passed
+```
+
+A 403 with an empty body does not count as a pass. A check passes only on a 4xx
+that carries a machine readable code, because a reverse proxy in front of a
+broken daemon returns exactly a bodiless 403.
+
 ## What is guaranteed, and what is not
 
-The table a reader actually needs. It lists the gaps too, because a table of
-only wins is a table nobody believes.
+The gaps are in the table too. A table of only wins is a table nobody believes.
 
 | | process backend | container backend |
 | --- | --- | --- |
 | one owner cannot read another's files | yes | yes |
-| symlink out of the workspace refused | yes | yes |
+| symlink out of the sandbox refused | yes | yes |
 | wall clock and output size capped | yes | yes |
 | memory capped | `RLIMIT_AS`, advisory on macOS | yes, cgroup |
-| filesystem outside the workspace | readable | no, read only root |
+| filesystem outside the sandbox | readable | no, read-only root |
 | network | **host network, wide open** | none by default |
 | egress allowlist | **refused, cannot honour it** | host level, not port level |
-| runs as root | as the daemon's user | no, the daemon's own uid; refuses outright if cordon is root |
+| runs as root | as the daemon's user | no, and refuses if cordon is root |
 | kernel level escape | shares the host kernel | shares the host kernel |
 
-Two things to read twice. The **process backend has no network isolation**: it
-is for code you wrote, on a box where that is already true. And the container
+Two rows to read twice. The **process backend has no network isolation**: it is
+for code you wrote, on a box where that is already true. And the container
 backend's **egress allowlist is host level**: a job allowed to reach
-`db.internal:5432` can reach that host on any port. Both are v2 items and both
+`db.internal:5432` can reach that host on any port. Both are v2 items, and both
 are stated here rather than left to be discovered.
 
-cordon is not a hypervisor. It shares the host kernel either way. A kernel
-level escape defeats it, and nothing in this README claims otherwise.
+cordon shares the host kernel either way. A kernel level escape defeats it and
+nothing here claims otherwise. If your threat model needs a hypervisor, you need
+a hypervisor.
 
-One more gap, in the ownership model rather than the sandbox. With
-`inherit: true` an owner reaches the files sitting directly in its ancestors'
-workspaces, and nothing deeper. The ownership tree is the directory tree, so
-every subdirectory of `acme/legal` is or could become another owner, and
-granting the subtree would grant the sibling. A team that needs a shared folder
-tree is its own owner, or you `/v1/fork` the template into the member's
-workspace.
+One more gap, in the ownership model rather than the sandbox: a shared team
+subtree is out of reach in v1, for the reason given under Architecture. A team
+that needs one is its own owner, or you fork the template into the member's
+sandbox.
 
 ## Which backend
 
-**process**, the default. One process, cwd pinned to the workspace, scrubbed
-environment, rlimits applied between fork and exec, its own session so a
-timeout takes the children too. Runs on a 1 GB VPS with nothing installed.
+**process**, the default. One process, working directory pinned to the sandbox,
+scrubbed environment, rlimits applied between fork and exec, its own session so
+a timeout takes the children too. Runs on a 1 GB VPS with nothing installed.
 
-**container**, `CORDON_BACKEND=container`. Needs Docker or podman's docker
+**container**, `CORDON_BACKEND=container`. Needs Docker, or podman's docker
 alias. Never needs KVM or nested virtualisation. `--network none`,
 `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
 `--pids-limit 128`, and a `noexec` tmpfs for scratch. The job runs as the
-daemon's own uid, which is what keeps the bind-mounted workspace writable from
-both sides; if cordon itself is running as root the container backend refuses,
-rather than handing a job uid 0 inside a container that shares the host kernel.
+daemon's own uid, which is what keeps the bind-mounted sandbox writable from both
+sides.
 
 Pick by who wrote the code. Yours: process. The model's, or your customer's:
 container.
 
 If Docker is down, a container job answers 503 `backend_unavailable`. It never
-silently falls back to the process backend, because that would hand a caller
-weaker isolation than it asked for without telling it.
-
-## API
-
-| | |
-| --- | --- |
-| `GET /v1/health` | liveness |
-| `POST /v1/resolve` | may this owner touch this path, and does it exist |
-| `POST /v1/run` | run a job in the owner's workspace, collect its output |
-| `GET /v1/artifact/{token}` | fetch one collected file by token |
-| `POST /v1/fork` | copy a workspace to a new owner, never overwriting |
-
-Every refusal is a 4xx carrying a stable `code`: `invalid_owner`,
-`absolute_path_rejected`, `path_escapes_workspace`, `limit_exceeded`,
-`backend_cannot_honour_request`, `backend_unavailable`, `artifact_not_found`,
-`destination_exists`, `source_not_found`. Only a daemon fault is a 5xx.
+silently falls back to the process backend, because that hands a caller weaker
+isolation than it asked for without telling it.
 
 ## Configuration
 
 | variable | default | |
 | --- | --- | --- |
-| `CORDON_ROOT` | `/var/lib/cordon` | where workspaces live |
+| `CORDON_ROOT` | `/var/lib/cordon` | where sandboxes live |
 | `CORDON_LISTEN` | `unix:/run/cordond.sock` | or `tcp:127.0.0.1:7777` |
 | `CORDON_TOKEN` | unset | required for a non loopback listener |
 | `CORDON_BACKEND` | `process` | or `container` |
@@ -241,10 +373,27 @@ Every refusal is a 4xx carrying a stable `code`: `invalid_owner`,
 The daemon refuses to start on a listener the network can reach with no token.
 That is not a warning in a log, it is an exit.
 
-## Footprint
+`packaging/cordond.service` is a systemd unit with `ProtectSystem=strict` and a
+dedicated user, and a comment saying plainly that the container backend needs
+that user in the `docker` group, which is equivalent to root on the host.
 
-Measured by `tests/footprint.rs`, which starts the release binary, sends it 50
-requests and reads its RSS:
+## Local development
+
+```bash
+cargo test                                      # 85 tests
+cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
+cargo clippy --all-targets -- -D warnings
+cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
+cd clients/typescript && bun test               # 7 tests
+```
+
+CI runs on a Linux runner with Docker, so the container backend is exercised for
+real on every push: a container job starts, writes to its sandbox, and is
+confirmed to have no network. A container test that skips there fails the build,
+so the coverage cannot quietly lapse.
+
+Footprint, measured by `tests/footprint.rs`, which starts the release binary,
+sends it 50 requests and reads its RSS:
 
 ```
 daemon RSS while serving: 4960 KB
@@ -253,23 +402,29 @@ test result: ok. 1 passed
 
 The budget is 20 MB and it is a test, not a sentence.
 
-## Status
+## Security
 
-v1. The guarantee has 85 tests behind it, and the four mutations that matter
-were each confirmed to break the suite: forcing the path check to pass, skipping
-the on-disk resolution, forcing ancestor reach on, and dropping the
-nul/percent/backslash rejection.
+The guarantee has 85 tests behind it, and the four mutations that matter were
+each confirmed to break the suite:
 
-CI runs on a Linux runner with Docker, so the container backend is exercised for
-real on every push: a container job runs, writes to its workspace, and is
-confirmed to have no network. The job fails if either container test reports
-SKIPPED, so the coverage cannot quietly lapse.
+| mutation | result |
+| --- | --- |
+| the path check forced to pass | 3 passed, 5 failed |
+| the on-disk resolution skipped | 5 passed, 3 failed |
+| ancestor reach forced on | 7 passed, 1 failed |
+| the nul, percent and backslash rejection dropped | 7 passed, 1 failed |
+
+`src/guard.rs` is the file to read if you read only one. Its tests are written as
+attacks rather than as examples.
+
+Found a way past it? Open an issue with the path string. A reproducer is worth
+more than a report.
 
 ## Licence
 
-The daemon is AGPL 3.0. Run it, embed it, put it behind your product: the
-licence only asks that if you modify the daemon itself and offer it over a
-network, you publish those modifications.
+The daemon is AGPL 3.0. Run it, embed it, put it behind your product: the licence
+only asks that if you modify the daemon itself and offer it over a network, you
+publish those modifications.
 
 The clients under `clients/` are Apache 2.0, so linking one into a closed source
 application needs nothing from you.
