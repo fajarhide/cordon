@@ -1,0 +1,12 @@
+{
+  "name": "@cordon/client",
+  "version": "0.1.0",
+  "description": "Client for cordon, per-owner workspace isolation for AI agent runtimes",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "repository": { "type": "git", "url": "https://github.com/fajarhide/cordon" },
+  "scripts": { "test": "bun test" },
+  "devDependencies": { "typescript": "^5" }
+}

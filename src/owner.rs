@@ -151,8 +151,8 @@ mod tests {
 
     #[test]
     fn refuses_more_segments_than_the_cap() {
-        owner(&vec!["a"; 8]).expect("8 is the cap");
-        assert!(owner(&vec!["a"; 9]).is_err(), "9 segments was accepted");
+        owner(&["a"; 8]).expect("8 is the cap");
+        assert!(owner(&["a"; 9]).is_err(), "9 segments was accepted");
     }
 
     /// Review Focus 1. Two spellings of one word must never become two
