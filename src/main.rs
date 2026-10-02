@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod resolve;
+#[cfg(test)]
+mod testsupport;
 mod guard;
 mod owner;
 mod http;

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -53,6 +53,7 @@ impl IntoResponse for ApiError {
 pub fn router(cfg: Arc<Config>) -> Router {
     Router::new()
         .route("/v1/health", get(|| async { Json(json!({ "status": "ok" })) }))
+        .route("/v1/resolve", post(crate::resolve::handler))
         .with_state(cfg)
 }
 
