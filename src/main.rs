@@ -5,6 +5,7 @@
 
 mod artifact;
 mod exec;
+mod fork;
 mod run;
 mod config;
 mod resolve;
