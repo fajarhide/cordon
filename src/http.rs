@@ -54,6 +54,7 @@ pub fn router(cfg: Arc<Config>) -> Router {
     Router::new()
         .route("/v1/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .route("/v1/resolve", post(crate::resolve::handler))
+        .route("/v1/artifact/{token}", get(crate::artifact::handler))
         .with_state(cfg)
 }
 
