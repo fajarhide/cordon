@@ -28,6 +28,15 @@ impl Drop for Fixture {
 /// Two owners under one root: acme/budi holding notes.md, acme/ani holding
 /// secret.md. Every endpoint test starts from this and tries to cross it.
 pub fn fixture(tag: &str) -> Fixture {
+    build(tag, None)
+}
+
+/// The same fixture with a bearer token configured, for the auth tests.
+pub fn fixture_with_token(tag: &str, token: &str) -> Fixture {
+    build(tag, Some(token.to_string()))
+}
+
+fn build(tag: &str, token: Option<String>) -> Fixture {
     let mut tmp = std::env::temp_dir();
     tmp.push(format!("cordon-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -46,7 +55,7 @@ pub fn fixture(tag: &str) -> Fixture {
     let cfg = Arc::new(Config {
         root: tmp.clone(),
         listen: "unix:/tmp/unused.sock".into(),
-        token: None,
+        token,
         backend: "process".into(),
         image: "alpine:3.20".into(),
         artifact_ttl: std::time::Duration::from_secs(3600),
@@ -66,13 +75,26 @@ pub fn owner_dir(root: &std::path::Path, segments: &[&str]) -> PathBuf {
 /// Posts through the real router, so a test exercises routing, extraction and
 /// the error shape rather than calling a handler function directly.
 pub async fn post(f: &Fixture, uri: &str, payload: &str) -> (StatusCode, Value) {
+    post_auth(f, uri, payload, None).await
+}
+
+/// Posts with an explicit Authorization header value, or none at all.
+pub async fn post_auth(
+    f: &Fixture,
+    uri: &str,
+    payload: &str,
+    auth: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(a) = auth {
+        b = b.header("authorization", a);
+    }
     let res = crate::http::router(Arc::clone(&f.cfg))
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from(payload.to_string()))
+            b.body(Body::from(payload.to_string()))
                 .expect("build request"),
         )
         .await
@@ -87,13 +109,16 @@ pub async fn post(f: &Fixture, uri: &str, payload: &str) -> (StatusCode, Value) 
 }
 
 pub async fn get(f: &Fixture, uri: &str) -> (StatusCode, Vec<u8>) {
+    get_auth(f, uri, None).await
+}
+
+pub async fn get_auth(f: &Fixture, uri: &str, auth: Option<&str>) -> (StatusCode, Vec<u8>) {
+    let mut b = Request::builder().uri(uri);
+    if let Some(a) = auth {
+        b = b.header("authorization", a);
+    }
     let res = crate::http::router(Arc::clone(&f.cfg))
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .expect("build request"),
-        )
+        .oneshot(b.body(Body::empty()).expect("build request"))
         .await
         .expect("router answered");
     let status = res.status();
