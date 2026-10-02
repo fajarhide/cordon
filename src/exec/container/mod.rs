@@ -16,15 +16,11 @@ use tokio::process::Command;
 use super::{read_capped, ExecError, Job, Outcome};
 
 const PIDS_LIMIT: &str = "128";
-/// The nobody uid on every mainstream distribution. A job never runs as root,
-/// because a root process in a container that shares a kernel is one escape
-/// away from root on the host.
-const NOBODY: &str = "65534:65534";
 
 pub async fn run(image: &str, job: Job) -> Result<Outcome, ExecError> {
     // Arguments are built before the daemon is probed, so a malformed egress
     // entry is a request error rather than reported as docker being down.
-    let args = docker_args(image, &job)?;
+    let args = docker_args_as(image, &job, current_ids()?)?;
     docker_reachable().await?;
 
     let started = Instant::now();
@@ -75,17 +71,41 @@ pub async fn run(image: &str, job: Job) -> Result<Outcome, ExecError> {
     }
 }
 
+/// The uid:gid a container job runs as.
+///
+/// It is the daemon's own, not `nobody`. The workspace is a bind mount owned by
+/// the daemon's user, so a job running as 65534 cannot write to its own
+/// workspace: the redirect fails, and because a shell keeps going after a
+/// failed redirect the job can still exit 0 and look fine. CI caught exactly
+/// that.
+///
+/// Running as the daemon's uid keeps file ownership correct on both sides of
+/// the mount and is still unprivileged, as long as the daemon itself is not
+/// root. When it is, the container backend refuses rather than handing a job
+/// uid 0 inside a container that shares the host kernel.
+fn current_ids() -> Result<String, ExecError> {
+    // Reading the process's own ids. No pointers, no allocation, cannot fail.
+    #[allow(unsafe_code)]
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    if uid == 0 {
+        return Err(ExecError::Unsupported(
+            "cordon is running as root, so a container job would run as root inside a container that shares the host kernel; run cordon as an unprivileged user (see packaging/cordond.service)".into(),
+        ));
+    }
+    Ok(format!("{uid}:{gid}"))
+}
+
 /// Builds the argument list. Split out from `run` so the isolation policy can
 /// be asserted in a unit test with no Docker daemon anywhere near it, which is
 /// the only way these flags get reviewed on every change.
-pub fn docker_args(image: &str, job: &Job) -> Result<Vec<String>, ExecError> {
+pub fn docker_args_as(image: &str, job: &Job, user: String) -> Result<Vec<String>, ExecError> {
     let mut a: Vec<String> = vec![
         "run".into(),
         "--rm".into(),
         "-i".into(),
         "--read-only".into(),
         "--user".into(),
-        NOBODY.into(),
+        user,
         "--cap-drop".into(),
         "ALL".into(),
         "--security-opt".into(),
@@ -163,7 +183,9 @@ mod tests {
     }
 
     fn joined(j: &Job) -> String {
-        docker_args("alpine:3.20", j).unwrap().join(" ")
+        docker_args_as("alpine:3.20", j, "1000:1000".into())
+            .unwrap()
+            .join(" ")
     }
 
     #[test]
@@ -186,10 +208,24 @@ mod tests {
 
     #[test]
     fn the_job_never_runs_as_root() {
+        // The daemon's own uid, which is what makes the bind mount writable.
+        // Root is refused outright, which current_ids covers.
         assert!(
-            joined(&job("true")).contains("--user 65534:65534"),
-            "not pinned to nobody"
+            joined(&job("true")).contains("--user 1000:1000"),
+            "no --user pinned"
         );
+    }
+
+    #[test]
+    fn a_container_job_refuses_to_run_as_root() {
+        // current_ids is what enforces it; this asserts the message an
+        // operator sees, since the condition itself depends on who runs the
+        // test suite.
+        let msg = match current_ids() {
+            Err(ExecError::Unsupported(m)) => m,
+            _ => return, // not running as root, nothing to assert here
+        };
+        assert!(msg.contains("unprivileged"), "unhelpful message: {msg}");
     }
 
     #[test]
@@ -200,7 +236,7 @@ mod tests {
 
     #[test]
     fn the_image_and_entrypoint_come_last_so_no_flag_can_follow() {
-        let args = docker_args("alpine:3.20", &job("echo hi")).unwrap();
+        let args = docker_args_as("alpine:3.20", &job("echo hi"), "1000:1000".into()).unwrap();
         let image_at = args.iter().position(|a| a == "alpine:3.20").unwrap();
         assert_eq!(args[image_at + 1], "sh");
         assert!(
@@ -215,7 +251,7 @@ mod tests {
     fn an_argument_that_looks_like_a_flag_is_not_treated_as_one() {
         let mut j = job("true");
         j.entrypoint = "--privileged".into();
-        let args = docker_args("alpine:3.20", &j).unwrap();
+        let args = docker_args_as("alpine:3.20", &j, "1000:1000".into()).unwrap();
         let image_at = args.iter().position(|a| a == "alpine:3.20").unwrap();
         assert_eq!(args[image_at + 1], "--privileged", "{args:?}");
         assert!(image_at > 0 && args[image_at - 1] != "--privileged");
@@ -225,7 +261,7 @@ mod tests {
     fn a_malformed_egress_entry_is_a_request_error_not_a_backend_error() {
         let mut j = job("true");
         j.egress = vec!["--privileged:443".into()];
-        let err = docker_args("alpine:3.20", &j).unwrap_err();
+        let err = docker_args_as("alpine:3.20", &j, "1000:1000".into()).unwrap_err();
         assert!(matches!(err, ExecError::Unsupported(_)), "got {err:?}");
     }
 
@@ -270,7 +306,14 @@ mod tests {
         .unwrap();
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
         assert_eq!(out.stdout.trim(), "done");
-        assert_eq!(std::fs::read(ws.join("out.txt")).unwrap(), b"hi");
+        // A shell carries on after a failed redirect, so exit 0 alone does not
+        // mean the write happened. An empty stderr is what proves it.
+        assert_eq!(out.stderr, "", "the job wrote to stderr");
+        assert_eq!(
+            std::fs::read(ws.join("out.txt"))
+                .expect("the job could not write to its own workspace"),
+            b"hi"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

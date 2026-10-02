@@ -169,7 +169,7 @@ only wins is a table nobody believes.
 | filesystem outside the workspace | readable | no, read only root |
 | network | **host network, wide open** | none by default |
 | egress allowlist | **refused, cannot honour it** | host level, not port level |
-| runs as root | as the daemon's user | no, uid 65534 |
+| runs as root | as the daemon's user | no, the daemon's own uid; refuses outright if cordon is root |
 | kernel level escape | shares the host kernel | shares the host kernel |
 
 Two things to read twice. The **process backend has no network isolation**: it
@@ -198,7 +198,10 @@ timeout takes the children too. Runs on a 1 GB VPS with nothing installed.
 **container**, `CORDON_BACKEND=container`. Needs Docker or podman's docker
 alias. Never needs KVM or nested virtualisation. `--network none`,
 `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
-`--pids-limit 128`, uid 65534, and a `noexec` tmpfs for scratch.
+`--pids-limit 128`, and a `noexec` tmpfs for scratch. The job runs as the
+daemon's own uid, which is what keeps the bind-mounted workspace writable from
+both sides; if cordon itself is running as root the container backend refuses,
+rather than handing a job uid 0 inside a container that shares the host kernel.
 
 Pick by who wrote the code. Yours: process. The model's, or your customer's:
 container.
@@ -257,11 +260,10 @@ were each confirmed to break the suite: forcing the path check to pass, skipping
 the on-disk resolution, forcing ancestor reach on, and dropping the
 nul/percent/backslash rejection.
 
-Not verified yet: no container has actually been run. The container backend's
-isolation policy is asserted at the argument level, with every flag under test,
-but the two tests that need a live Docker skip on a machine without it. Treat
-the container backend as unproven until it runs on your Linux host and
-`cordon verify` passes there.
+CI runs on a Linux runner with Docker, so the container backend is exercised for
+real on every push: a container job runs, writes to its workspace, and is
+confirmed to have no network. The job fails if either container test reports
+SKIPPED, so the coverage cannot quietly lapse.
 
 ## Licence
 
