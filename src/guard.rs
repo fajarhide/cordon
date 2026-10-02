@@ -28,37 +28,27 @@ impl fmt::Display for GuardError {
 }
 
 pub struct Guard {
-    /// The owner's own workspace, canonicalised. Reachable in full, subtree
-    /// included.
-    own: PathBuf,
-    /// Ancestor workspaces, canonicalised, nearest first. Reachable only one
-    /// level deep. See `permits` for why.
-    ancestors: Vec<PathBuf>,
-    /// Where a relative path is joined from: always the owner's own workspace,
-    /// never an ancestor, so `../x` has to earn its way out through `permits`.
-    base: PathBuf,
+    root: PathBuf,
+    owner: Owner,
+    inherit: bool,
 }
 
 impl Guard {
     pub fn new(root: &Path, owner: &Owner, inherit: bool) -> Self {
-        let base = owner.dir(root);
-        let own = canonical_or_literal(&base);
-        let ancestors = if inherit {
-            owner
-                .ancestors()
-                .iter()
-                .map(|a| canonical_or_literal(&a.dir(root)))
-                .collect()
-        } else {
-            Vec::new()
-        };
         Guard {
-            own,
-            ancestors,
-            base,
+            root: root.to_path_buf(),
+            owner: owner.clone(),
+            inherit,
         }
     }
 
+    /// Returns the real, canonicalised location of `rel`, or refuses.
+    ///
+    /// The returned path is the one that was checked, not the one that was
+    /// asked for. Handing back the requested spelling lets a caller open a
+    /// name whose meaning changed after the answer (issue #5). It is still not
+    /// a capability: a component created between this answer and the open is
+    /// outside what any path string can promise.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, GuardError> {
         if rel.is_empty() {
             return Err(GuardError::Escapes("<empty>".into()));
@@ -66,44 +56,72 @@ impl Guard {
         if rel.starts_with('/') || Path::new(rel).is_absolute() {
             return Err(GuardError::Absolute(rel.into()));
         }
-        // None of these are path syntax here. A caller that sends one is either
-        // confused about the interface or probing it, and both deserve a
-        // refusal rather than a best effort interpretation.
+        // None of these are path syntax here. A caller sending one is either
+        // confused about the interface or probing it, and both earn a refusal
+        // rather than a best effort interpretation.
         if rel.contains('\0') || rel.contains('%') || rel.contains('\\') {
             return Err(GuardError::Escapes(rel.into()));
         }
 
-        let joined = self.base.join(rel);
+        let (hops, tail) = split_hops(rel).ok_or_else(|| GuardError::Escapes(rel.into()))?;
+
+        let (base, ancestor) = if hops == 0 {
+            (self.owner.dir(&self.root), false)
+        } else {
+            if !self.inherit {
+                return Err(GuardError::Escapes(rel.into()));
+            }
+            let ancestors = self.owner.ancestors();
+            let Some(a) = ancestors.get(hops - 1) else {
+                return Err(GuardError::Escapes(rel.into()));
+            };
+            // An ancestor lends its own files, never a directory under them.
+            // One component only, so there is no subtree to walk.
+            if tail.len() != 1 {
+                return Err(GuardError::Escapes(rel.into()));
+            }
+            (a.dir(&self.root), true)
+        };
+
+        let joined = tail.iter().fold(base.clone(), |p, c| p.join(c));
         let real = resolve_existing(&joined).ok_or_else(|| GuardError::Escapes(rel.into()))?;
-        if !self.permits(&real) {
+
+        let allowed = if ancestor {
+            // Directly inside the ancestor's own workspace, and a file. A
+            // directory there could be anything, including a future owner.
+            real.parent() == Some(canonical_or_literal(&base).as_path()) && !real.is_dir()
+        } else {
+            let own = canonical_or_literal(&base);
+            real == own || real.starts_with(&own)
+        };
+        if !allowed {
             return Err(GuardError::Escapes(rel.into()));
         }
-        Ok(joined)
+        Ok(real)
     }
+}
 
-    /// The owner's own workspace is reachable in full. An ancestor's is
-    /// reachable one level deep, and only for files.
-    ///
-    /// That asymmetry is the whole point. The ownership tree IS the directory
-    /// tree, so every subdirectory of `acme/legal` either is or could become
-    /// another owner's workspace. Granting the ancestor's subtree therefore
-    /// grants `acme/legal/ani`, which is exactly the sibling the spec promises
-    /// to refuse. Narrowing an ancestor grant to its own files closes that
-    /// structurally, with no list of which directories happen to be owners
-    /// today.
-    ///
-    /// The cost: a shared team subtree is out of reach in v1. A team that
-    /// needs one is its own owner, or the application forks the template into
-    /// the member's workspace. Said plainly in the README's isolation table
-    /// rather than left for someone to discover.
-    fn permits(&self, real: &Path) -> bool {
-        if real == self.own || real.starts_with(&self.own) {
-            return true;
+/// Splits a request path into ancestor hops and the remaining components.
+///
+/// `..` is a step up the ownership tree, not a filesystem traversal, so it is
+/// only meaningful as a prefix. A `..` after any other component, a `.`
+/// anywhere, and an empty component are all refused rather than normalised,
+/// which removes the entire class of hidden-parent tricks instead of trying to
+/// out-guess them.
+fn split_hops(rel: &str) -> Option<(usize, Vec<&str>)> {
+    let mut hops = 0usize;
+    let mut tail: Vec<&str> = Vec::new();
+    for c in rel.split('/') {
+        match c {
+            ".." if tail.is_empty() => hops += 1,
+            ".." | "." | "" => return None,
+            other => tail.push(other),
         }
-        self.ancestors
-            .iter()
-            .any(|a| real.parent() == Some(a.as_path()) && !real.is_dir())
     }
+    if tail.is_empty() {
+        return None;
+    }
+    Some((hops, tail))
 }
 
 /// Canonicalises if the directory is there, falls back to the literal path if
@@ -225,10 +243,12 @@ mod tests {
     fn allows_the_owners_own_files() {
         let f = fixture("own");
         let g = Guard::new(&f.root, &f.budi, false);
-        assert_eq!(
-            g.resolve("notes.md").unwrap(),
-            f.budi.dir(&f.root).join("notes.md")
-        );
+        // Issue #5: the answer is the canonicalised path that was checked, not
+        // the spelling that was asked for.
+        let want = fs::canonicalize(f.budi.dir(&f.root))
+            .unwrap()
+            .join("notes.md");
+        assert_eq!(g.resolve("notes.md").unwrap(), want);
         // A file that does not exist yet still resolves, so a job can create it.
         assert!(g.resolve("out.txt").is_ok());
         // A nested path under a real directory resolves.
@@ -239,18 +259,25 @@ mod tests {
     #[test]
     fn inherit_reaches_an_ancestor_and_still_refuses_a_sibling() {
         let f = fixture("inherit");
-        let legal = f.budi.dir(&f.root).parent().unwrap().to_path_buf();
-        fs::write(legal.join("team.md"), b"ours").unwrap();
-        fs::write(legal.parent().unwrap().join("acme.md"), b"corp").unwrap();
+        for a in f.budi.ancestors() {
+            let d = a.dir(&f.root);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("team.md"), b"ours").unwrap();
+        }
 
         let g = Guard::new(&f.root, &f.budi, true);
+        // `..` is one step up the ownership tree, not a directory traversal.
         assert!(
             g.resolve("../team.md").is_ok(),
             "inherit must reach the parent"
         );
         assert!(
-            g.resolve("../../acme.md").is_ok(),
+            g.resolve("../../team.md").is_ok(),
             "inherit must reach the grandparent"
+        );
+        assert!(
+            g.resolve("../../../team.md").is_err(),
+            "there is no third ancestor to reach"
         );
         assert!(
             g.resolve("../ani/secret.md").is_err(),
@@ -321,6 +348,77 @@ mod tests {
             g.resolve("later").is_err(),
             "the planted symlink itself is still reachable"
         );
+    }
+
+    /// Issue #2. An owner must not read its descendant owners' bytes.
+    ///
+    /// Asserted on content, not on an error. A parent asking for `legal` gets a
+    /// creatable path inside its own workspace, which is legitimate; what must
+    /// never happen is that path handing back the child's file.
+    #[test]
+    fn a_parent_owner_cannot_read_its_childrens_bytes() {
+        let f = fixture("parent-child");
+        let acme = Owner::parse(&["acme".into()]).unwrap();
+        let legal = Owner::parse(&["acme".into(), "legal".into()]).unwrap();
+        for o in [&acme, &legal] {
+            fs::create_dir_all(o.dir(&f.root)).unwrap();
+        }
+        fs::write(legal.dir(&f.root).join("team.md"), b"LEGAL-SECRET").unwrap();
+        fs::write(f.budi.dir(&f.root).join("notes.md"), b"BUDI-SECRET").unwrap();
+
+        // inherit on, which is the most permissive setting there is.
+        let cases: [(&Owner, &[&str]); 2] = [
+            (
+                &acme,
+                &[
+                    "legal/budi/notes.md",
+                    "legal/team.md",
+                    "legal/.workspace/team.md",
+                    "legal/budi/.workspace/notes.md",
+                    "budi/notes.md",
+                ],
+            ),
+            (
+                &legal,
+                &["budi/notes.md", "budi/.workspace/notes.md", "ani/secret.md"],
+            ),
+        ];
+        for (who, attempts) in cases {
+            let g = Guard::new(&f.root, who, true);
+            for rel in attempts {
+                match g.resolve(rel) {
+                    Err(_) => {}
+                    Ok(p) => {
+                        let body = fs::read(&p).unwrap_or_default();
+                        assert!(
+                            body.is_empty(),
+                            "owner {who} read {rel:?} and got {:?}",
+                            String::from_utf8_lossy(&body)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `..` is an ownership step, so it only means anything as a prefix.
+    /// Everything else is refused rather than normalised, which removes the
+    /// hidden-parent class instead of trying to out-guess it.
+    #[test]
+    fn a_parent_step_is_refused_anywhere_but_the_front() {
+        let f = fixture("hops");
+        let g = Guard::new(&f.root, &f.budi, true);
+        for rel in [
+            "sub/../notes.md",
+            "notes.md/..",
+            "./notes.md",
+            "sub/./notes.md",
+            "a//b",
+            "..",
+            "../..",
+        ] {
+            assert!(g.resolve(rel).is_err(), "resolve({rel:?}) was allowed");
+        }
     }
 
     #[test]

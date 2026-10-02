@@ -250,7 +250,7 @@ fn glob(workspace: &Path, pattern: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use crate::testsupport::{fixture, get, post};
+    use crate::testsupport::{fixture, get, owner_dir, post};
     use axum::http::StatusCode;
 
     #[tokio::test]
@@ -369,7 +369,7 @@ mod tests {
             "limits":{"wall_ms":5000,"memory_mb":64,"stdout_kb":8}}"#;
         let (status, body) = post(&f, "/v1/run", payload).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(f.cfg.root.join("owners/acme/brandnew").is_dir());
+        assert!(owner_dir(&f.cfg.root, &["acme", "brandnew"]).is_dir());
     }
 
     /// Caught by an end to end run, not by the suite: the collect check used to

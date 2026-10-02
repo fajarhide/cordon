@@ -12,6 +12,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::config::Config;
+use crate::owner::Owner;
 
 pub struct Fixture {
     pub cfg: Arc<Config>,
@@ -30,10 +31,17 @@ pub fn fixture(tag: &str) -> Fixture {
     let mut tmp = std::env::temp_dir();
     tmp.push(format!("cordon-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(tmp.join("owners/acme/budi")).expect("fixture dirs");
-    std::fs::create_dir_all(tmp.join("owners/acme/ani")).expect("fixture dirs");
-    std::fs::write(tmp.join("owners/acme/budi/notes.md"), b"mine").expect("fixture file");
-    std::fs::write(tmp.join("owners/acme/ani/secret.md"), b"hers").expect("fixture file");
+
+    // Built through Owner::dir rather than a hardcoded path, so a change to the
+    // on-disk layout cannot leave the fixture describing the old one. The
+    // previous version spelled owners/acme/budi by hand and went stale the
+    // moment the workspace leaf arrived.
+    std::fs::create_dir_all(owner_dir(&tmp, &["acme", "budi"])).expect("fixture dirs");
+    std::fs::create_dir_all(owner_dir(&tmp, &["acme", "ani"])).expect("fixture dirs");
+    std::fs::write(owner_dir(&tmp, &["acme", "budi"]).join("notes.md"), b"mine")
+        .expect("fixture file");
+    std::fs::write(owner_dir(&tmp, &["acme", "ani"]).join("secret.md"), b"hers")
+        .expect("fixture file");
 
     let cfg = Arc::new(Config {
         root: tmp.clone(),
@@ -46,6 +54,13 @@ pub fn fixture(tag: &str) -> Fixture {
         max_memory_mb: 256,
     });
     Fixture { cfg, tmp }
+}
+
+/// Where an owner's own files live, for a test that needs to look at disk.
+pub fn owner_dir(root: &std::path::Path, segments: &[&str]) -> PathBuf {
+    Owner::parse(&segments.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .expect("valid owner in a test")
+        .dir(root)
 }
 
 /// Posts through the real router, so a test exercises routing, extraction and

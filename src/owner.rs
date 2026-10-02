@@ -8,7 +8,21 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 const MAX_SEGMENTS: usize = 8;
-const MAX_SEGMENT_LEN: usize = 128;
+/// 64 rather than 128. A UUID is 36 characters and is the single most likely
+/// owner id, so the cap has to clear it comfortably; 128 made eight segments
+/// long enough to overrun PATH_MAX on a deep root, which surfaced as a 500.
+/// Mapping that error to a 4xx is issue #10 and still open.
+const MAX_SEGMENT_LEN: usize = 64;
+
+/// An owner's own files live in this leaf, never in the directory that holds its
+/// child owners.
+///
+/// Without it the ownership tree and the directory tree are the same object, so
+/// `owners/acme` physically contains `owners/acme/legal/budi` and an ancestor
+/// reaches every descendant. A segment can never be spelled `.workspace`,
+/// because `validate` refuses a leading dot, so this leaf cannot collide with a
+/// child owner's name.
+pub const WORKSPACE_LEAF: &str = ".workspace";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owner {
@@ -34,7 +48,14 @@ impl Owner {
         })
     }
 
+    /// Where this owner's own files live.
     pub fn dir(&self, root: &Path) -> PathBuf {
+        self.node(root).join(WORKSPACE_LEAF)
+    }
+
+    /// The node in the ownership tree, which holds this owner's workspace leaf
+    /// and the nodes of its children. Nothing may be resolved against it.
+    fn node(&self, root: &Path) -> PathBuf {
         let mut p = root.join("owners");
         for s in &self.segments {
             p.push(s);
@@ -64,12 +85,18 @@ impl fmt::Display for Owner {
 /// someone eventually finds a gap in; an allowlist of the characters real
 /// identifiers use has no gap to find.
 ///
-/// ASCII only, on purpose. A tenant id, a user id or a team slug is machine
-/// generated and ASCII in every system this integrates with. Allowing Unicode
-/// means deciding what `cafe\u{0301}` and `caf\u{00e9}` mean, and on a
-/// normalising case-insensitive filesystem that decision is not ours to make:
-/// one spelling would become two workspaces on Linux and one on macOS. A
-/// caller holding a Unicode display name hashes or slugifies it first.
+/// Lowercase ASCII only, on purpose. A tenant id, a user id or a team slug is
+/// machine generated and ASCII in every system this integrates with.
+///
+/// Unicode is refused because deciding what `cafe\u{0301}` and `caf\u{00e9}`
+/// mean is not the daemon's call: one spelling becomes two workspaces on Linux
+/// and one on macOS.
+///
+/// Uppercase is refused for exactly the same reason, which the first version of
+/// this comment reasoned about and then failed to apply. APFS, SMB and NFS are
+/// case insensitive, so `BUDI` and `budi` would be two owners sharing one
+/// directory there and two separate ones on ext4. A caller holding a mixed case
+/// identifier lowercases it before passing it, which is its decision to make.
 fn validate(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("owner segment is empty".into());
@@ -84,14 +111,14 @@ fn validate(s: &str) -> Result<(), String> {
     }
     if let Some(bad) = s.chars().find(|c| !is_allowed(*c)) {
         return Err(format!(
-            "owner segment {s:?} contains {bad:?}; allowed: a-z A-Z 0-9 - _ ."
+            "owner segment {s:?} contains {bad:?}; allowed: a-z 0-9 - _ ."
         ));
     }
     Ok(())
 }
 
 fn is_allowed(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
+    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.'
 }
 
 #[cfg(test)]
@@ -107,7 +134,7 @@ mod tests {
         let o = owner(&["acme", "legal", "budi"]).expect("valid owner");
         assert_eq!(
             o.dir(Path::new("/var/lib/cordon")),
-            PathBuf::from("/var/lib/cordon/owners/acme/legal/budi")
+            PathBuf::from("/var/lib/cordon/owners/acme/legal/budi/.workspace")
         );
         assert_eq!(o.to_string(), "acme/legal/budi");
     }
@@ -116,7 +143,6 @@ mod tests {
     fn accepts_the_characters_identifiers_actually_use() {
         for s in [
             "acme",
-            "ACME",
             "acme-corp",
             "acme_corp",
             "team.legal",
@@ -151,8 +177,35 @@ mod tests {
 
     #[test]
     fn refuses_a_segment_over_the_length_cap() {
-        assert!(owner(&["acme", &"a".repeat(129)]).is_err());
-        owner(&["acme", &"a".repeat(128)]).expect("128 is the cap, not over it");
+        assert!(owner(&["acme", &"a".repeat(65)]).is_err());
+        owner(&["acme", &"a".repeat(64)]).expect("64 is the cap, not over it");
+    }
+
+    /// Issue #4. On a case insensitive filesystem an uppercase spelling would be
+    /// a second owner sharing the first one's directory.
+    #[test]
+    fn refuses_uppercase_so_two_spellings_cannot_share_a_directory() {
+        for s in ["ACME", "Budi", "budI", "acme-Corp"] {
+            assert!(owner(&["acme", s]).is_err(), "{s:?} was accepted");
+        }
+        owner(&["acme", "budi"]).expect("the lowercase spelling stays valid");
+    }
+
+    /// Issue #2. An owner's own files sit in a leaf that cannot contain a child
+    /// owner's leaf, so no containment check can ever walk from one to the other.
+    #[test]
+    fn an_owners_files_never_contain_a_child_owners_files() {
+        let parent = owner(&["acme"]).unwrap();
+        let child = owner(&["acme", "legal", "budi"]).unwrap();
+        let r = Path::new("/r");
+        assert!(
+            !child.dir(r).starts_with(parent.dir(r)),
+            "{} contains {}",
+            parent.dir(r).display(),
+            child.dir(r).display()
+        );
+        // And the leaf cannot be spelled as a segment, so nothing can collide.
+        assert!(owner(&["acme", WORKSPACE_LEAF]).is_err());
     }
 
     #[test]
@@ -185,6 +238,11 @@ mod tests {
         let o = owner(&["acme", "legal", "budi"]).unwrap();
         let got: Vec<String> = o.ancestors().iter().map(ToString::to_string).collect();
         assert_eq!(got, vec!["acme/legal", "acme"]);
+        let r = Path::new("/r");
+        assert_eq!(
+            o.ancestors()[0].dir(r),
+            PathBuf::from("/r/owners/acme/legal/.workspace")
+        );
     }
 
     #[test]
