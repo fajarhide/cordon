@@ -2,9 +2,38 @@
 
 **A sandbox per person. One binary, no KVM, no VM, runs on a 1 GB VPS.**
 
-cordon gives every user, team and AI agent its own sandbox on disk, and makes it
-impossible for one to reach another's files. The model picks the path; cordon
-decides whether that path was allowed.
+cordon gives every user, team and AI agent its own sandbox on disk, and decides
+whether a path the model chose belongs to the session it came from.
+
+> ### v1 does not yet deliver that for every endpoint. Do not deploy it.
+>
+> An adversarial review on 3 Oct 2026 broke the isolation claim in five places,
+> each with a reproducer. Tracked in [the open issues](https://github.com/fajarhide/cordon/issues):
+>
+> - **`/v1/run` does not go through the guard at all.** The process backend only
+>   sets the working directory, so a job can `cat ../other-owner/secret.md`. The
+>   guard checks `collect` patterns and nothing else. This is the default backend.
+> - **An owner's own subtree includes its descendant owners.** `acme` reaches
+>   `acme/legal/budi`, because the ownership tree is the directory tree. This one
+>   hits the container backend too, and needs no job at all.
+> - **`CORDON_TOKEN` is read at startup and never checked on a request.** There
+>   is no authentication. The daemon refuses to start on a public listener
+>   without a token and then ignores it.
+> - **On a case-insensitive filesystem, `BUDI` is a different owner reading
+>   `budi`'s files.** The Unicode reasoning was applied and case was missed.
+> - **`/v1/resolve` returns the unresolved path**, so the integration this README
+>   recommends can be defeated by swapping a directory for a symlink between the
+>   answer and the open.
+>
+> **`cordon verify` passes 9 of 9 against a daemon with every one of those holes
+> open.** It only probes `/v1/resolve` with two same-depth owners. It touches
+> `/v1/run`, `/v1/fork`, `/v1/artifact`, parent-child owner pairs, authentication
+> and backend selection not at all. Treat a green `cordon verify` as meaningless
+> until these are closed.
+>
+> What does hold: every path-string attack against `/v1/resolve` between two
+> same-depth owners, which is what the 85 tests cover. That is a real but much
+> smaller claim than the one this README made.
 
 [![CI](https://github.com/fajarhide/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/fajarhide/cordon/actions/workflows/ci.yml)
 
@@ -280,11 +309,26 @@ async function readFile(session: Session, path: string) {
 `["org_42", "team_legal", "u_991"]`, a single `["u_991"]`. cordon does not care,
 as long as it is the same array every turn for the same user.
 
+**This example is currently unsafe, by the daemon's fault not yours.**
+`resolve` hands back the path as it was asked for rather than the one it
+validated, so a job that replaces a directory with a symlink between the answer
+and the `Bun.file()` call reads through it. Issue #5. Do not ship this shape
+until that is closed.
+
+A hierarchy like `["org_42", "team_legal", "u_991"]` is also the configuration
+issue #2 leaks, so `["u_991"]` is the only shape that is not affected by it
+today.
+
 ## Prove it on your own box
 
-`cordon verify` fires the same attacks at a daemon you are already running, so
-you do not have to take this README's word for anything. It exits non-zero on
-any failure, which is what makes it belong in a deploy pipeline.
+`cordon verify` fires path-string attacks at a daemon you are already running
+and exits non-zero if one lands.
+
+**It is not a clean bill of health, and in v1 it is actively misleading.** It
+probes `/v1/resolve` with two same-depth owners and nothing else: not
+`/v1/run`, not a parent-child owner pair, not authentication, not backend
+selection. It passes against a daemon that leaks every owner's files. Keeping it
+out of your pipeline until the open issues are closed is the right call.
 
 ```
 $ cordon verify http://127.0.0.1:7777
@@ -312,7 +356,7 @@ The gaps are in the table too. A table of only wins is a table nobody believes.
 
 | | process backend | container backend |
 | --- | --- | --- |
-| one owner cannot read another's files | yes | yes |
+| one owner cannot read another's files | **no, see issue #1** | partly, see issue #2 |
 | symlink out of the sandbox refused | yes | yes |
 | wall clock and output size capped | yes | yes |
 | memory capped | `RLIMIT_AS`, advisory on macOS | yes, cgroup |
@@ -404,8 +448,11 @@ The budget is 20 MB and it is a test, not a sentence.
 
 ## Security
 
-The guarantee has 85 tests behind it, and the four mutations that matter were
-each confirmed to break the suite:
+85 tests, and four mutations each confirmed to break the suite. Read the scope
+honestly though: the tests cover `src/guard.rs` and `src/owner.rs` thoroughly,
+and those are not the layer that guards the data on `/v1/run`. That gap is issue
+#1, and it is the lesson rather than a footnote: a heavily tested module proves
+nothing about a code path that goes around it.
 
 | mutation | result |
 | --- | --- |
@@ -416,6 +463,9 @@ each confirmed to break the suite:
 
 `src/guard.rs` is the file to read if you read only one. Its tests are written as
 attacks rather than as examples.
+
+The fixture in `src/testsupport.rs` only ever builds two owners at the same
+depth, which is why issue #2 survived every one of those tests.
 
 Found a way past it? Open an issue with the path string. A reproducer is worth
 more than a report.
