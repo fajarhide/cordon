@@ -62,7 +62,7 @@ pub fn guard_error(e: GuardError, path: &str) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use crate::testsupport::{fixture, post};
+    use crate::testsupport::{fixture, owner_dir, post};
     use axum::http::StatusCode;
 
     #[tokio::test]
@@ -80,7 +80,7 @@ mod tests {
             body["resolved"]
                 .as_str()
                 .unwrap()
-                .ends_with("/acme/budi/notes.md"),
+                .ends_with("/acme/budi/.workspace/notes.md"),
             "{body}"
         );
     }
@@ -145,7 +145,9 @@ mod tests {
     #[tokio::test]
     async fn inherit_is_off_unless_asked_for() {
         let f = fixture("resolve-inherit");
-        std::fs::write(f.cfg.root.join("owners/acme/team.md"), b"ours").unwrap();
+        let acme = owner_dir(&f.cfg.root, &["acme"]);
+        std::fs::create_dir_all(&acme).unwrap();
+        std::fs::write(acme.join("team.md"), b"ours").unwrap();
         let (off, _) = post(
             &f,
             "/v1/resolve",

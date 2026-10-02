@@ -94,7 +94,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use crate::testsupport::{fixture, post};
+    use crate::testsupport::{fixture, owner_dir, post};
     use axum::http::StatusCode;
 
     #[tokio::test]
@@ -108,11 +108,13 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
-            std::fs::read(f.cfg.root.join("owners/acme/copy/notes.md")).unwrap(),
+            std::fs::read(owner_dir(&f.cfg.root, &["acme", "copy"]).join("notes.md")).unwrap(),
             b"mine"
         );
         assert!(
-            f.cfg.root.join("owners/acme/budi/notes.md").exists(),
+            owner_dir(&f.cfg.root, &["acme", "budi"])
+                .join("notes.md")
+                .exists(),
             "source changed"
         );
     }
@@ -120,8 +122,12 @@ mod tests {
     #[tokio::test]
     async fn copies_nested_directories() {
         let f = fixture("fork-nested");
-        std::fs::create_dir_all(f.cfg.root.join("owners/acme/budi/a/b")).unwrap();
-        std::fs::write(f.cfg.root.join("owners/acme/budi/a/b/deep.txt"), b"deep").unwrap();
+        std::fs::create_dir_all(owner_dir(&f.cfg.root, &["acme", "budi"]).join("a/b")).unwrap();
+        std::fs::write(
+            owner_dir(&f.cfg.root, &["acme", "budi"]).join("a/b/deep.txt"),
+            b"deep",
+        )
+        .unwrap();
         let (status, body) = post(
             &f,
             "/v1/fork",
@@ -130,7 +136,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
-            std::fs::read(f.cfg.root.join("owners/acme/copy2/a/b/deep.txt")).unwrap(),
+            std::fs::read(owner_dir(&f.cfg.root, &["acme", "copy2"]).join("a/b/deep.txt")).unwrap(),
             b"deep"
         );
     }
@@ -147,7 +153,7 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"]["code"], "destination_exists", "{body}");
         assert_eq!(
-            std::fs::read(f.cfg.root.join("owners/acme/ani/secret.md")).unwrap(),
+            std::fs::read(owner_dir(&f.cfg.root, &["acme", "ani"]).join("secret.md")).unwrap(),
             b"hers",
             "the destination's own file was overwritten"
         );
@@ -157,8 +163,8 @@ mod tests {
     async fn a_symlink_is_dropped_rather_than_copied() {
         let f = fixture("fork-symlink");
         std::os::unix::fs::symlink(
-            f.cfg.root.join("owners/acme/ani/secret.md"),
-            f.cfg.root.join("owners/acme/budi/peek"),
+            owner_dir(&f.cfg.root, &["acme", "ani"]).join("secret.md"),
+            owner_dir(&f.cfg.root, &["acme", "budi"]).join("peek"),
         )
         .unwrap();
         let (status, body) = post(
@@ -169,7 +175,9 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(
-            !f.cfg.root.join("owners/acme/copy3/peek").exists(),
+            !owner_dir(&f.cfg.root, &["acme", "copy3"])
+                .join("peek")
+                .exists(),
             "a symlink to a sibling's file was carried into the fork"
         );
         assert_eq!(body["skipped_links"], 1, "{body}");
