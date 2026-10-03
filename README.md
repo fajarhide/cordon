@@ -304,6 +304,8 @@ It writes a secret as one owner and has another owner's job try to read it, by
 every shape the review used. It checks authentication, the parent-child owner
 pair, the backend floor, and all three ways of asking for an artifact.
 
+Pasted from a CI run on Linux, abridged in the middle:
+
 ```
 $ cordon verify http://127.0.0.1:7777 $CORDON_TOKEN
 
@@ -311,15 +313,26 @@ ok   no credentials refused           status 401, code unauthorized
 ok   a wrong token refused            status 401, code unauthorized
 ok   parent traversal                 status 403, code path_escapes_workspace
 ok   absolute path                    status 400, code absolute_path_rejected
+ok   percent encoded                  status 403, code path_escapes_workspace
+ok   dotdot owner                     status 400, code invalid_owner
+ok   non ascii owner                  status 400, code invalid_owner
 ok   uppercase owner                  status 400, code invalid_owner
+ok   reach the token store            status 403, code path_escapes_workspace
 ok   parent reaches its child         status 403, code path_escapes_workspace
+ok   parent reaches the child leaf    status 403, code path_escapes_workspace
 ok   a job cannot read another owner  the job ran and could not reach it
 ok   an artifact needs its owner      status 404 with no owner
 ok   an artifact refuses another owner status 404, same body as a bare fetch
+ok   an artifact works for its owner  the owner got its own bytes
 ok   a weaker backend is refused      status 400, code backend_below_floor
+ok   a zero memory limit is refused   status 400, code limit_exceeded
 
 all 22 checks passed
 ```
+
+On a daemon configured for the process backend the floor check reports
+`skip  a weaker backend is refused   this daemon is configured for the process
+backend, so there is no floor to test`, which is what a skip is for.
 
 **A check it cannot run reports as `skip`, never as a pass.** That distinction is
 the point. The first version of this tool passed 9 of 9 against a daemon that

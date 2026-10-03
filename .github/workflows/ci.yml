@@ -77,6 +77,24 @@ jobs:
       - name: cordon verify
         run: ./target/release/cordon verify http://127.0.0.1:7777 ci-token
 
+      # A second daemon, configured for the container backend, so the backend
+      # floor check runs instead of skipping. It is the one check the
+      # process-configured daemon above cannot exercise.
+      - name: cordon verify against a container-configured daemon
+        run: |
+          mkdir -p /tmp/cordon-ci-ctr
+          CORDON_ROOT=/tmp/cordon-ci-ctr CORDON_LISTEN=tcp:127.0.0.1:7778 \
+            CORDON_TOKEN=ci-token CORDON_BACKEND=container \
+            ./target/release/cordon serve &
+          for _ in $(seq 40); do
+            curl -sf http://127.0.0.1:7778/v1/health >/dev/null && break
+            sleep 0.25
+          done
+          ./target/release/cordon verify http://127.0.0.1:7778 ci-token | tee /tmp/ctr.txt
+          grep -q "ok   a weaker backend is refused" /tmp/ctr.txt || {
+            echo "the backend floor check did not run on a container-configured daemon"
+            exit 1; }
+
       # A run with no credentials must not report success: every check skips,
       # nothing passes, and the exit code has to say so.
       - name: cordon verify refuses to pass without credentials
