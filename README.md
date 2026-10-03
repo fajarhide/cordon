@@ -5,6 +5,8 @@
 cordon gives every user, team and AI agent its own sandbox on disk, and decides
 whether a path the model chose belongs to the session it came from.
 
+![one server seen from above, a sandbox per person; a tricked agent tries three ways into a neighbour's sandbox and is refused each time](assets/hero.gif)
+
 > ### Every finding from the adversarial review is closed.
 >
 > A review on 3 Oct 2026 broke the isolation claim in five places and found
@@ -581,11 +583,12 @@ from what the binary does:
 ```bash
 vhs tapes/demo.tape        # and verify.tape, usecase.tape
 python3 tapes/architecture.py /tmp/archframes
+python3 tapes/hero.py /tmp/heroframes
 ```
 
 `tapes/serve.sh` starts the daemon the two live recordings talk to. The
-architecture animation is SVG frames rendered with `rsvg-convert` and assembled
-with `ffmpeg`; the command is in the header of `tapes/architecture.py`.
+architecture and hero animations are SVG frames rendered with `rsvg-convert` and
+assembled with `ffmpeg`; the command is in the header of `tapes/hero.py`.
 
 Footprint, measured by `tests/footprint.rs`, which starts the release binary,
 waits for it to answer, sends it 50 requests, checks it is still answering, and
