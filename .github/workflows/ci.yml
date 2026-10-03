@@ -195,6 +195,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun test
         working-directory: clients/typescript
+      # The runner's own Ruby. The client is stdlib only, so there is nothing
+      # to install.
+      - run: ruby test/cordon_test.rb
+        working-directory: clients/ruby
 
   prose:
     name: No em dashes

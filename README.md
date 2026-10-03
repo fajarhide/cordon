@@ -370,6 +370,28 @@ async function readFile(session: Session, path: string) {
 }
 ```
 
+The same call from Ruby, with the client under `clients/ruby`:
+
+```ruby
+# Gemfile
+gem "cordon-client", git: "https://github.com/fajarhide/cordon", glob: "clients/ruby/*.gemspec"
+```
+
+```ruby
+require "cordon"
+
+CORDON = Cordon::Client.new("http://127.0.0.1:7777")
+
+def read_file(session, path)
+  found = CORDON.resolve(session.owner, path)
+  return { error: "file not found" } unless found["exists"]
+
+  { content: File.read(found["resolved"]) }
+rescue Cordon::Error => e
+  { error: e.code }
+end
+```
+
 `session.owner` is whatever your tenancy already looks like: `["acme", "budi"]`,
 `["org_42", "team_legal", "u_991"]`, a single `["u_991"]`. cordon does not care,
 as long as it is the same array every turn for the same user.
@@ -575,6 +597,7 @@ cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
 cd clients/typescript && bun test               # 9 tests
+ruby clients/ruby/test/cordon_test.rb           # 10 tests, stdlib only
 
 # the container backend, against either runtime. CORDON_REQUIRE_DOCKER makes a
 # skipped container test a failure, which is how CI stops coverage lapsing.
