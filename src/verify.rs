@@ -16,11 +16,13 @@
 //! dependency. It runs once, by hand or in a pipeline, and reads a handful of
 //! fields.
 //!
-//! It leaves its workspaces behind under the owner prefix `cordon-verify`,
-//! because there is no endpoint that deletes an owner. Say so rather than
-//! surprise someone.
+//! Its probes live under the owner prefix `cordon-verify`, which is reserved
+//! for it. There is no endpoint that deletes an owner, so they stay on disk
+//! unless `--root` names the daemon's `CORDON_ROOT`, in which case verify
+//! removes them itself once the run has passed (issue #20).
 
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -448,12 +450,37 @@ pub fn report(checks: &[Check], w: &mut impl Write, s: Style) -> bool {
     } else {
         let _ = writeln!(w, "{}", s.green(&format!("all {passed} checks passed")));
     }
-    let _ = writeln!(
-        w,
-        "\n{}",
-        s.dim("Workspaces under the owner prefix cordon-verify are left behind; there is no endpoint that deletes an owner.")
-    );
     true
+}
+
+/// Removes the probe workspaces, or says plainly that they are still there.
+///
+/// Only after a pass. A failed run is the one time somebody wants to look at
+/// what the probes left on disk.
+pub fn tidy(root: Option<&Path>, passed: bool, w: &mut impl Write, s: Style) {
+    let msg = match root {
+        None => "Workspaces under the reserved owner prefix cordon-verify are left behind. Pass --root <CORDON_ROOT> to remove them.".to_string(),
+        Some(_) if !passed => {
+            "The run did not pass, so the cordon-verify workspaces were kept for inspection.".to_string()
+        }
+        Some(root) => {
+            let probes = root.join("owners").join("cordon-verify");
+            // A missing directory is not a success: the usual cause is a path
+            // that is not the root of the daemon that was just probed.
+            if !probes.is_dir() {
+                format!(
+                    "Nothing to remove at {}. Is that the CORDON_ROOT of the daemon that was probed?",
+                    probes.display()
+                )
+            } else {
+                match std::fs::remove_dir_all(&probes) {
+                    Ok(()) => format!("Removed the probe workspaces at {}.", probes.display()),
+                    Err(e) => format!("Could not remove {}: {e}", probes.display()),
+                }
+            }
+        }
+    };
+    let _ = writeln!(w, "\n{}", s.dim(&msg));
 }
 
 struct Client {
@@ -681,6 +708,41 @@ mod tests {
         assert!(text.contains("skip"), "{text}");
         assert!(text.contains("A skip is not a pass"), "{text}");
         assert!(!text.contains("all 2 checks passed"), "{text}");
+    }
+
+    /// Issue #20. With a root, a passing run removes its own probes and
+    /// nothing beside them.
+    #[test]
+    fn tidy_removes_the_probes_and_only_the_probes() {
+        let root = std::env::temp_dir().join(format!("cordon-tidy-{}", std::process::id()));
+        let probe = root.join("owners/cordon-verify/a/.workspace");
+        let other = root.join("owners/acme/budi/.workspace");
+        std::fs::create_dir_all(&probe).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(probe.join("mine.txt"), b"own").unwrap();
+        std::fs::write(other.join("notes.md"), b"mine").unwrap();
+        let say = |root: Option<&Path>, passed| {
+            let mut out = Vec::new();
+            tidy(root, passed, &mut out, Style::plain());
+            String::from_utf8(out).unwrap()
+        };
+
+        assert!(say(None, true).contains("left behind"));
+        assert!(probe.exists(), "removed with no root given");
+
+        assert!(say(Some(&root), false).contains("kept for inspection"));
+        assert!(probe.exists(), "removed after a failed run");
+
+        assert!(say(Some(&root), true).contains("Removed"));
+        assert!(
+            !root.join("owners/cordon-verify").exists(),
+            "the probes are still there"
+        );
+        assert!(other.join("notes.md").exists(), "another owner was removed");
+
+        // A second run finds nothing, and does not call that a removal.
+        assert!(say(Some(&root), true).contains("Nothing to remove"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

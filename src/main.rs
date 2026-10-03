@@ -25,8 +25,9 @@ const USAGE: &str = "\
 cordon gives each owner an isolated workspace and refuses every path out of it.
 
   cordon serve             run the daemon
-  cordon verify [addr] [token]
-                           prove the guarantee against a running daemon
+  cordon verify [addr] [token] [--root <CORDON_ROOT>]
+                           prove the guarantee against a running daemon;
+                           --root removes the probe workspaces afterwards
   cordon demo [root]       two owners, every escape refused, no daemon needed
 ";
 
@@ -36,21 +37,38 @@ async fn main() -> std::process::ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("serve") => serve().await,
         Some("verify") => {
+            let mut args = args[1..].to_vec();
+            // Wherever it appears, so it can be appended to an existing call.
+            let root = match args.iter().position(|a| a == "--root") {
+                None => None,
+                Some(i) if i + 1 < args.len() => {
+                    let path = args.remove(i + 1);
+                    args.remove(i);
+                    Some(std::path::PathBuf::from(path))
+                }
+                Some(_) => {
+                    eprintln!("cordon: --root needs the daemon's CORDON_ROOT");
+                    return std::process::ExitCode::from(2);
+                }
+            };
             let addr = args
-                .get(1)
+                .first()
                 .cloned()
                 .unwrap_or_else(|| "http://127.0.0.1:7777".into());
             // The token comes from the argument, or the environment, so a
             // pipeline does not have to put a secret on a command line.
             let token = args
-                .get(2)
+                .get(1)
                 .cloned()
                 .or_else(|| std::env::var("CORDON_TOKEN").ok())
                 .filter(|t| !t.is_empty());
             match verify::run(&addr, token.as_deref()).await {
                 Err(e) => Err(e),
                 Ok(checks) => {
-                    if verify::report(&checks, &mut std::io::stdout(), style::Style::for_stdout()) {
+                    let style = style::Style::for_stdout();
+                    let passed = verify::report(&checks, &mut std::io::stdout(), style);
+                    verify::tidy(root.as_deref(), passed, &mut std::io::stdout(), style);
+                    if passed {
                         Ok(())
                     } else {
                         return std::process::ExitCode::FAILURE;
@@ -97,6 +115,19 @@ async fn main() -> std::process::ExitCode {
 async fn serve() -> Result<(), String> {
     let cfg = Arc::new(config::Config::from_env()?);
     let app = http::router(Arc::clone(&cfg));
+
+    // An expired artifact is refused whether or not its record is still on
+    // disk; this only stops the records piling up. The first tick fires at
+    // once, so a restart sweeps too.
+    let root = cfg.root.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            tick.tick().await;
+            let root = root.clone();
+            let _ = tokio::task::spawn_blocking(move || artifact::reap(&root)).await;
+        }
+    });
     println!(
         "cordon listening on {}, root {}, backend {}",
         cfg.listen,

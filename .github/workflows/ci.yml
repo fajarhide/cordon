@@ -102,8 +102,13 @@ jobs:
 
       # With a token, so the auth checks run rather than skip, and on Linux,
       # so the data plane checks run rather than skip. Both are the point.
+      # --root, so the probe workspaces are removed, and a check that they
+      # were: a run on every deploy must not grow the root.
       - name: cordon verify
-        run: ./target/release/cordon verify http://127.0.0.1:7777 ci-token
+        run: |
+          ./target/release/cordon verify http://127.0.0.1:7777 ci-token --root /tmp/cordon-ci
+          test ! -e /tmp/cordon-ci/owners/cordon-verify || {
+            echo "verify --root left its probe workspaces behind"; exit 1; }
 
       # A second daemon, configured for the container backend, so the backend
       # floor check runs instead of skipping. It is the one check the

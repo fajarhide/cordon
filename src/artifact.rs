@@ -98,6 +98,36 @@ pub async fn handler(
         .into_response())
 }
 
+/// Deletes the records of expired tokens and returns how many went.
+///
+/// The handler already refuses an expired token, so this is housekeeping and
+/// not a check (issue #18). A record that does not parse is left alone: `mint`
+/// creates the file and then fills it, so an empty one may be a token that is
+/// about to exist.
+pub fn reap(root: &Path) -> usize {
+    let now = now_secs();
+    // now_secs answers MAX when the clock is unreadable. That is the right
+    // answer for refusing a fetch and the wrong one for deleting every record.
+    if now == u64::MAX {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(root.join("artifacts")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rec"))
+        .filter(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|s| parse_record(&s))
+                .is_some_and(|(_, _, expires)| now >= expires)
+        })
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
+}
+
 /// `art_` and exactly 32 lowercase hex characters. Checking the shape before
 /// touching the filesystem is what stops `art_../../etc/passwd` from becoming
 /// a filename.
@@ -204,9 +234,40 @@ mod tests {
         Arc::get_mut(&mut f.cfg).expect("sole owner").artifact_ttl = Duration::from_secs(0);
         let file = budi().dir(&f.cfg.root).join("notes.md");
         let token = mint(&f.cfg, &budi(), &file).unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
-        let (status, _) = get(&f, &format!("/v1/artifact/{token}")).await;
+        // With the right owner. Without one this was refused for the missing
+        // owner and passed whether or not expiry was checked at all.
+        let (status, _) = get(&f, &format!("/v1/artifact/{token}?owner=acme/budi")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Issue #18. Refusing an expired token and deleting its record are two
+    /// things, and only the first one used to happen.
+    #[tokio::test]
+    async fn reap_deletes_expired_records_and_nothing_else() {
+        let mut f = fixture("art-reap");
+        let file = budi().dir(&f.cfg.root).join("notes.md");
+        let dir = f.cfg.root.join("artifacts");
+        let rec = |t: &str| dir.join(format!("{t}.rec"));
+
+        let live = mint(&f.cfg, &budi(), &file).unwrap();
+        Arc::get_mut(&mut f.cfg).expect("sole owner").artifact_ttl = Duration::from_secs(0);
+        let dead = mint(&f.cfg, &budi(), &file).unwrap();
+        // A record caught between create and write, and a file that is not ours.
+        std::fs::write(rec("art_half"), b"").unwrap();
+        std::fs::write(dir.join("README"), b"not a record").unwrap();
+
+        assert_eq!(reap(&f.cfg.root), 1);
+        assert!(!rec(&dead).exists(), "the expired record is still on disk");
+        assert!(rec(&live).exists(), "a live record was deleted");
+        assert!(
+            rec("art_half").exists(),
+            "an unparseable record was deleted"
+        );
+        assert!(dir.join("README").exists(), "a stranger's file was deleted");
+
+        let (status, _) = get(&f, &format!("/v1/artifact/{live}?owner=acme/budi")).await;
+        assert_eq!(status, StatusCode::OK, "the live token stopped working");
+        assert_eq!(reap(&f.cfg.root), 0, "a second sweep found something");
     }
 
     /// Review Focus 5. A valid token and the wrong owner must be refused, and
