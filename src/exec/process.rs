@@ -15,14 +15,29 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{read_capped, ExecError, Job, Outcome};
+use super::{read_capped, ExecError, Job, Network, Outcome};
 
 pub async fn run(job: Job) -> Result<Outcome, ExecError> {
-    if !job.egress.is_empty() {
-        return Err(ExecError::Unsupported(
-            "the process backend shares the host network namespace and cannot enforce an egress allowlist; use the container backend".into(),
-        ));
-    }
+    // This backend shares the host network namespace. It can therefore give a
+    // job open access, which is what it always gave, and it cannot give a job
+    // no access at all. Saying so is the honest inversion of the old code,
+    // which refused an "egress allowlist" while handing out the whole host
+    // network by default (issues #1 and #11).
+    let network = match &job.network {
+        None => Network::Open { pins: Vec::new() },
+        Some(Network::Open { pins }) if pins.is_empty() => Network::Open { pins: Vec::new() },
+        Some(Network::Open { .. }) => {
+            return Err(ExecError::Unsupported(
+                "the process backend cannot pin host names for a job; use the container backend"
+                    .into(),
+            ))
+        }
+        Some(Network::None) => {
+            return Err(ExecError::Unsupported(
+                "the process backend shares the host network namespace and cannot give a job no network; use the container backend".into(),
+            ))
+        }
+    };
 
     // Issue #1: this used to be the whole of the isolation, a working
     // directory and nothing else. The boundary is built here, in the parent
@@ -86,6 +101,7 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
             stderr,
             truncated: ot || et,
             duration_ms: started.elapsed().as_millis(),
+            network: network.clone(),
         }),
         // 124 is what timeout(1) uses, so an operator reading a log already
         // knows what it means.
@@ -95,6 +111,7 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
             stderr: format!("killed after {}ms", job.limits.wall_ms),
             truncated: true,
             duration_ms: started.elapsed().as_millis(),
+            network,
         }),
     }
 }
@@ -180,7 +197,7 @@ mod tests {
                 memory_mb: 256,
                 stdout_kb: 64,
             },
-            egress: vec![],
+            network: None,
             // Linux gets a real boundary from landlock, so CI enforces it.
             // Everywhere else there is nothing to enforce, so the suite runs
             // without one and the boundary itself is tested only on Linux.
@@ -239,16 +256,27 @@ mod tests {
         assert!(out.stdout.len() <= 2048, "kept {} bytes", out.stdout.len());
     }
 
-    /// The process backend shares the host network namespace, so it cannot
-    /// honour an allowlist. Refusing is the only honest answer: silently
-    /// granting full network access because the caller asked for two hosts
-    /// would be worse than either.
+    /// This backend shares the host network namespace, so it can offer open
+    /// access and cannot offer none. A caller that explicitly asks for no
+    /// network is refused rather than quietly handed the whole host network,
+    /// which is what used to happen.
     #[tokio::test]
-    async fn an_egress_allowlist_is_refused_rather_than_ignored() {
-        let mut j = job(tmp("egress"), "true");
-        j.egress = vec!["example.com:443".into()];
+    async fn asking_for_no_network_is_refused_rather_than_ignored() {
+        let mut j = job(tmp("nonet"), "true");
+        j.network = Some(crate::exec::Network::None);
         let err = Backend::Process.run(j).await.expect_err("must refuse");
         assert!(matches!(err, ExecError::Unsupported(_)), "got {err:?}");
+    }
+
+    /// And the response says what the job actually got, so a caller never has
+    /// to guess.
+    #[tokio::test]
+    async fn the_outcome_reports_the_network_the_job_really_had() {
+        let out = Backend::Process
+            .run(job(tmp("reportnet"), "true"))
+            .await
+            .unwrap();
+        assert_eq!(out.network.label(), "open");
     }
 
     /// Review Focus 3. Two jobs for one owner must not interleave into a

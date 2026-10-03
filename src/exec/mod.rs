@@ -15,6 +15,32 @@ pub struct Limits {
     pub stdout_kb: usize,
 }
 
+/// What a job can reach on the network.
+///
+/// Two values, because v1 has two to offer. There is no packet filter anywhere
+/// in it, so anything that is not `None` is the host's full outbound access,
+/// and `Open` is named that way so it cannot be read as something narrower
+/// (issue #11).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Network {
+    #[default]
+    None,
+    Open {
+        /// Name to address pins, a convenience for reaching an internal
+        /// service by name. Not a restriction.
+        pins: Vec<container::hosts::Pin>,
+    },
+}
+
+impl Network {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Network::None => "none",
+            Network::Open { .. } => "open",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Job {
     pub workspace: PathBuf,
@@ -22,7 +48,9 @@ pub struct Job {
     pub args: Vec<String>,
     pub stdin: String,
     pub limits: Limits,
-    pub egress: Vec<String>,
+    /// None means the caller did not ask, so each backend uses what it can
+    /// actually provide and the response says which.
+    pub network: Option<Network>,
     /// Only consulted by the process backend, and only to decide whether a
     /// missing filesystem boundary is fatal.
     pub unsafe_process: bool,
@@ -35,6 +63,8 @@ pub struct Outcome {
     pub stderr: String,
     pub truncated: bool,
     pub duration_ms: u128,
+    /// What the job actually got, which is not always what it asked for.
+    pub network: Network,
 }
 
 #[derive(Debug)]
@@ -60,14 +90,14 @@ impl fmt::Display for ExecError {
 
 pub enum Backend {
     Process,
-    Container { image: String },
+    Container { image: String, cli: String },
 }
 
 impl Backend {
     pub async fn run(&self, job: Job) -> Result<Outcome, ExecError> {
         match self {
             Backend::Process => process::run(job).await,
-            Backend::Container { image } => container::run(image, job).await,
+            Backend::Container { image, cli } => container::run(cli, image, job).await,
         }
     }
 }

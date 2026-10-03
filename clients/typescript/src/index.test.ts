@@ -46,6 +46,7 @@ describe("Cordon", () => {
           stderr: "",
           truncated: false,
           duration_ms: 3,
+          network: "none",
           artifacts: [{ token: "art_abc", path: "out/r.txt", bytes: 2 }],
         });
       }
@@ -101,6 +102,25 @@ describe("Cordon", () => {
     });
     await c.resolve(["a"], "b");
     expect(headers?.get("authorization")).toBeNull();
+  });
+
+  test("network and hosts go through as given", async () => {
+    let body: any;
+    const c = new Cordon("http://x", async (_u, init) => {
+      body = JSON.parse(String(init?.body));
+      return ok({ exit_code: 0, stdout: "", stderr: "", truncated: false,
+                  duration_ms: 1, network: "open", artifacts: [] });
+    });
+    const res = await c.run({
+      owner: ["acme", "budi"],
+      entrypoint: "true",
+      network: "open",
+      hosts: { "litellm.internal": "10.0.0.5" },
+    });
+    expect(body.network).toBe("open");
+    expect(body.hosts).toEqual({ "litellm.internal": "10.0.0.5" });
+    // And the response says what it got, rather than echoing what was asked.
+    expect(res.network).toBe("open");
   });
 
   test("fork passes both owners", async () => {
