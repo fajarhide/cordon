@@ -326,12 +326,18 @@ mod tests {
 
         // Every shape the review used, run from inside the job rather than
         // through the guard, because the guard is not what was broken.
+        //
+        // The find output is fenced by markers. An earlier version of this test
+        // just grepped stdout for the filename and failed on cat's own error
+        // text, which mentions the path it was denied.
         let script = "\
             cat ../../ani/.workspace/secret.md 2>&1;
             cat ../../../owners/acme/ani/.workspace/secret.md 2>&1;
-            find / -name secret.md 2>/dev/null | head -5;
             ls ../.. 2>&1;
-            cat /etc/passwd > /dev/null 2>&1 && echo READ-ETC-PASSWD;
+            echo FIND-START;
+            find / -name secret.md 2>/dev/null | head -5;
+            echo FIND-END;
+            cat /etc/passwd > /dev/null 2>&1 && echo CAN-READ-ETC;
             echo DONE";
 
         let mut j = job(budi.dir(&root), script);
@@ -344,11 +350,20 @@ mod tests {
             "a job read another owner's file:\n{}",
             out.stdout
         );
+
+        let found = out
+            .stdout
+            .split("FIND-START")
+            .nth(1)
+            .and_then(|s| s.split("FIND-END").next())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         assert!(
-            !out.stdout.contains("/secret.md"),
-            "a job found another owner's file by walking the filesystem:\n{}",
-            out.stdout
+            found.is_empty(),
+            "a job found another owner's file by walking the filesystem:\n{found}"
         );
+
         // And it can still work inside its own sandbox.
         let mut j2 = job(budi.dir(&root), "printf mine > own.txt; cat own.txt");
         j2.unsafe_process = false;
