@@ -4,3 +4,4 @@ node_modules/
 
 # Internal spec and plan. Local only, never pushed.
 /docs/
+__pycache__/
