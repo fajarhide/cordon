@@ -63,6 +63,13 @@ impl Owner {
         p
     }
 
+    /// Whether this owner is `prefix` or sits under it. Compared a segment at
+    /// a time: `acme2` is not inside `acme`, which is what comparing the
+    /// joined strings would say.
+    pub fn within(&self, prefix: &Owner) -> bool {
+        self.segments.starts_with(&prefix.segments)
+    }
+
     /// Nearest ancestor first, so a caller can take the most specific match
     /// without sorting.
     pub fn ancestors(&self) -> Vec<Owner> {
@@ -243,6 +250,18 @@ mod tests {
             o.ancestors()[0].dir(r),
             PathBuf::from("/r/owners/acme/legal/.workspace")
         );
+    }
+
+    #[test]
+    fn within_compares_segments_not_strings() {
+        let acme = owner(&["acme"]).unwrap();
+        let legal = owner(&["acme", "legal"]).unwrap();
+        assert!(legal.within(&acme));
+        assert!(acme.within(&acme), "an owner is inside its own prefix");
+        assert!(!acme.within(&legal), "a parent is not inside its child");
+        assert!(!owner(&["acme2"]).unwrap().within(&acme));
+        assert!(!owner(&["acme", "legal2"]).unwrap().within(&legal));
+        assert!(!owner(&["acme", "lega"]).unwrap().within(&legal));
     }
 
     #[test]

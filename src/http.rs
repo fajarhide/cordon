@@ -13,6 +13,7 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::config::Config;
+use crate::token::Scope;
 
 /// One shape for every refusal, so a caller can branch on `code` instead of
 /// matching on prose. A refusal is 4xx, never 5xx: it is the daemon working.
@@ -109,6 +110,7 @@ pub fn router(cfg: Arc<Config>) -> Router {
         .route("/v1/run", post(crate::run::handler))
         .route("/v1/fork", post(crate::fork::handler))
         .route("/v1/artifact/{token}", get(crate::artifact::handler))
+        .route("/v1/token", post(crate::token::handler))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cfg),
             require_token,
@@ -128,31 +130,39 @@ pub fn router(cfg: Arc<Config>) -> Router {
 /// With no token configured every request is allowed, which is the unix socket
 /// and loopback case. Config::from_env is what refuses to start a reachable
 /// listener in that state.
+///
+/// It also decides what the credential may name, and attaches that to the
+/// request as a `Scope`. Every handler extracts it, so a route added outside
+/// this layer fails on the missing extension instead of running unscoped.
 async fn require_token(
     State(cfg): State<Arc<Config>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let Some(expected) = cfg.token.as_deref() else {
-        return Ok(next.run(req).await);
+    let scope = match cfg.token.as_deref() {
+        None => Some(Scope::Operator),
+        Some(expected) => req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(bearer_value)
+            .and_then(|got| {
+                if constant_time_eq(got.as_bytes(), expected.as_bytes()) {
+                    Some(Scope::Operator)
+                } else {
+                    crate::token::lookup(&cfg.root, got)
+                }
+            }),
     };
-
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(bearer_value);
-
-    match presented {
-        Some(got) if constant_time_eq(got.as_bytes(), expected.as_bytes()) => {
-            Ok(next.run(req).await)
-        }
-        _ => Err(ApiError::new(
+    let Some(scope) = scope else {
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "a bearer token is required",
-        )),
-    }
+        ));
+    };
+    req.extensions_mut().insert(scope);
+    Ok(next.run(req).await)
 }
 
 /// The scheme is case insensitive per RFC 7235, so `bearer` has to work too.

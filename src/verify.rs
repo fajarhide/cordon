@@ -102,6 +102,17 @@ const DATA_PLANE_NAMES: [&str; 6] = [
     "a zero memory limit is refused",
 ];
 
+/// Issue #17, and named once for the same reason.
+const SCOPE_NAMES: [&str; 7] = [
+    "scoped: its own prefix works",
+    "scoped: another owner refused",
+    "scoped: a lookalike refused",
+    "scoped: its parent refused",
+    "scoped: no inherit above it",
+    "scoped: no fork across",
+    "scoped: cannot issue tokens",
+];
+
 /// Path strings posted to `/v1/resolve`, each a thing a confused or hostile
 /// caller actually sends.
 const PATH_ATTEMPTS: &[(&str, &str)] = &[
@@ -195,11 +206,13 @@ pub async fn run(addr: &str, token: Option<&str>) -> Result<Vec<Check>, String> 
                 .map(|(n, _)| Check::skip(n, why.clone())),
         );
         out.extend(DATA_PLANE_NAMES.iter().map(|n| Check::skip(n, why.clone())));
+        out.extend(SCOPE_NAMES.iter().map(|n| Check::skip(n, why.clone())));
         return Ok(out);
     }
 
     out.extend(path_checks(&c).await?);
     out.extend(data_plane_checks(&c).await?);
+    out.extend(scope_checks(&c).await?);
     Ok(out)
 }
 
@@ -363,6 +376,131 @@ async fn data_plane_checks(c: &Client) -> Result<Vec<Check>, String> {
     Ok(out)
 }
 
+/// A token scoped to owner a, pointed at everything that is not owner a.
+///
+/// Written against the data the earlier checks left on disk rather than
+/// against the scope rule: b's secret is there, so the question asked is
+/// whether a's token can get at it, by each endpoint that names an owner.
+async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
+    let names = SCOPE_NAMES;
+    let skip_all =
+        |why: String| -> Vec<Check> { names.iter().map(|n| Check::skip(n, why.clone())).collect() };
+    if c.token.is_none() {
+        return Ok(skip_all(
+            "no token configured on this daemon, so there is nothing to scope".into(),
+        ));
+    }
+
+    let issue = r#"{"prefix":["cordon-verify","a"]}"#;
+    let (status, raw) = c.post("/v1/token", issue).await?;
+    let scoped = match (status, json_string(&raw, "token")) {
+        (200, Some(t)) => Client {
+            host: c.host.clone(),
+            token: Some(t),
+        },
+        (s, _) => {
+            return Ok(skip_all(format!(
+                "no scoped token could be issued, status {s} ({})",
+                json_string(&raw, "code").unwrap_or_else(|| "no code".into())
+            )))
+        }
+    };
+
+    // A refusal only counts when it is the scope refusing. Any other code is
+    // a request that failed for its own reasons and proves nothing here.
+    let outside = |name: &'static str, status: u16, raw: &str| {
+        if raw.contains(SECRET) {
+            return Check::fail(name, "the scoped token read another owner's file");
+        }
+        match json_string(raw, "code").as_deref() {
+            Some("owner_outside_token_scope") if status == 403 => {
+                Check::pass(name, "status 403, code owner_outside_token_scope")
+            }
+            Some(code) if (400..500).contains(&status) => Check::skip(
+                name,
+                format!("refused with {code}, which says nothing about the scope"),
+            ),
+            _ => Check::fail(
+                name,
+                format!("status {status}: the scope did not refuse it"),
+            ),
+        }
+    };
+    let mut out = Vec::with_capacity(names.len());
+
+    // Inside the prefix first, so the refusals below are not a daemon that
+    // refuses this token everything.
+    let (status, _) = scoped
+        .post(
+            "/v1/resolve",
+            r#"{"owner":["cordon-verify","a"],"path":"x.md"}"#,
+        )
+        .await?;
+    out.push(if status == 200 {
+        Check::pass(names[0], "status 200 for its own owner")
+    } else {
+        Check::fail(names[0], format!("status {status} for its own owner"))
+    });
+
+    let read_b = format!(
+        r#"{{"owner":{OWNER_B},"entrypoint":"cat","args":["secret.md"],
+             "limits":{{"wall_ms":10000,"memory_mb":128,"stdout_kb":16}}}}"#
+    );
+    let (status, raw) = scoped.post("/v1/run", &read_b).await?;
+    out.push(outside(names[1], status, &raw));
+
+    // cordon-verify/a2 starts with the same characters as cordon-verify/a.
+    let (status, raw) = scoped
+        .post(
+            "/v1/resolve",
+            r#"{"owner":["cordon-verify","a2"],"path":"x.md"}"#,
+        )
+        .await?;
+    out.push(outside(names[2], status, &raw));
+
+    let (status, raw) = scoped
+        .post(
+            "/v1/resolve",
+            r#"{"owner":["cordon-verify"],"path":"x.md"}"#,
+        )
+        .await?;
+    out.push(outside(names[3], status, &raw));
+
+    // The parent owner gets a file, the operator reads it through inherit to
+    // show the reach is real, and then the scoped token asks for the same.
+    let plant = r#"{"owner":["cordon-verify"],"entrypoint":"sh","args":["-c","printf shared > shared.md"],
+                    "limits":{"wall_ms":10000,"memory_mb":128,"stdout_kb":16}}"#;
+    let up = r#"{"owner":["cordon-verify","a"],"path":"../shared.md","inherit":true}"#;
+    let _ = c.post("/v1/run", plant).await?;
+    let (baseline, _) = c.post("/v1/resolve", up).await?;
+    let (status, raw) = scoped.post("/v1/resolve", up).await?;
+    out.push(if baseline != 200 {
+        Check::skip(
+            names[4],
+            format!(
+                "the operator token could not reach the parent's file either, status {baseline}"
+            ),
+        )
+    } else if status == 200 {
+        Check::fail(names[4], "it resolved a file above its prefix")
+    } else {
+        Check::refused(names[4], status, &raw)
+    });
+
+    let steal = format!(r#"{{"from":{OWNER_B},"to":["cordon-verify","a","stolen"]}}"#);
+    let (status, raw) = scoped.post("/v1/fork", &steal).await?;
+    out.push(outside(names[5], status, &raw));
+
+    let (status, raw) = scoped.post("/v1/token", issue).await?;
+    out.push(if json_string(&raw, "token").is_some() {
+        Check::fail(names[6], "a scoped token issued another token")
+    } else {
+        Check::refused(names[6], status, &raw)
+    });
+
+    Ok(out)
+}
+
 /// The backend floor only means something on a container-configured daemon.
 /// Refused before any job runs, so it needs no seed.
 async fn floor_check(c: &Client) -> Result<Check, String> {
@@ -459,11 +597,19 @@ pub fn report(checks: &[Check], w: &mut impl Write, s: Style) -> bool {
 /// what the probes left on disk.
 pub fn tidy(root: Option<&Path>, passed: bool, w: &mut impl Write, s: Style) {
     let msg = match root {
-        None => "Workspaces under the reserved owner prefix cordon-verify are left behind. Pass --root <CORDON_ROOT> to remove them.".to_string(),
+        None => "Workspaces under the reserved owner prefix cordon-verify, and the token scoped to it, are left behind. Pass --root <CORDON_ROOT> to remove them.".to_string(),
         Some(_) if !passed => {
             "The run did not pass, so the cordon-verify workspaces were kept for inspection.".to_string()
         }
         Some(root) => {
+            // The scoped token verify issued for itself, and any an earlier
+            // run left. Matched on the whole prefix, so a real owner called
+            // cordon-verify-something keeps its tokens.
+            for e in std::fs::read_dir(root.join("tokens")).into_iter().flatten().flatten() {
+                if std::fs::read_to_string(e.path()).is_ok_and(|s| s.trim_end() == "cordon-verify/a") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
             let probes = root.join("owners").join("cordon-verify");
             // A missing directory is not a success: the usual cause is a path
             // that is not the root of the daemon that was just probed.
@@ -683,6 +829,36 @@ mod tests {
         );
     }
 
+    /// Issue #17. A daemon that issues a scoped token and then ignores the
+    /// scope answers every request the same way it answers the operator.
+    #[tokio::test]
+    async fn a_daemon_that_ignores_the_scope_is_caught() {
+        let addr = serve(
+            r#"{"token":"tok_x","resolved":"/x","exists":true,"exit_code":0,"stdout":"CORDON-VERIFY-SECRET-B","forked":"x"}"#,
+            200,
+        )
+        .await;
+        let checks = run(&addr, Some("t")).await.unwrap();
+        for name in &SCOPE_NAMES[1..] {
+            let c = checks.iter().find(|c| &c.name == name).unwrap();
+            assert!(
+                matches!(c.outcome, Outcome::Fail),
+                "{name} did not fail against a daemon that ignores the scope"
+            );
+        }
+    }
+
+    /// And one that cannot issue a scoped token proves nothing about them.
+    #[tokio::test]
+    async fn a_daemon_with_no_scoped_tokens_skips_the_scope_checks() {
+        let addr = serve(r#"{"error":{"code":"not_found","message":"no"}}"#, 404).await;
+        let checks = run(&addr, Some("t")).await.unwrap();
+        for name in &SCOPE_NAMES {
+            let c = checks.iter().find(|c| &c.name == name).unwrap();
+            assert!(matches!(c.outcome, Outcome::Skip(_)), "{name} did not skip");
+        }
+    }
+
     #[tokio::test]
     async fn an_unreachable_daemon_is_an_error_not_a_pass() {
         assert!(run("http://127.0.0.1:1", None).await.is_err());
@@ -721,6 +897,10 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(probe.join("mine.txt"), b"own").unwrap();
         std::fs::write(other.join("notes.md"), b"mine").unwrap();
+        let tokens = root.join("tokens");
+        std::fs::create_dir_all(&tokens).unwrap();
+        std::fs::write(tokens.join("tok_ours.rec"), "cordon-verify/a\n").unwrap();
+        std::fs::write(tokens.join("tok_theirs.rec"), "cordon-verify-prod/a\n").unwrap();
         let say = |root: Option<&Path>, passed| {
             let mut out = Vec::new();
             tidy(root, passed, &mut out, Style::plain());
@@ -739,6 +919,14 @@ mod tests {
             "the probes are still there"
         );
         assert!(other.join("notes.md").exists(), "another owner was removed");
+        assert!(
+            !tokens.join("tok_ours.rec").exists(),
+            "verify's own token is still valid"
+        );
+        assert!(
+            tokens.join("tok_theirs.rec").exists(),
+            "someone else's token was revoked"
+        );
 
         // A second run finds nothing, and does not call that a removal.
         assert!(say(Some(&root), true).contains("Nothing to remove"));

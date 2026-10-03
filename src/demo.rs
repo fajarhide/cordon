@@ -36,7 +36,7 @@ pub fn run(root: &Path, out: &mut impl Write, s: Style) -> std::io::Result<bool>
         s.dim("a/peek and a/theirs, both symlinks into b")
     )?;
 
-    let guard = Guard::new(root, &a, false);
+    let guard = Guard::new(root, &a, false, &crate::token::Scope::Operator);
 
     writeln!(out, "{}", s.bold("owner a reads its own file"))?;
     match guard.resolve("notes.md") {

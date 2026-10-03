@@ -11,11 +11,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use serde::Deserialize;
 
 use crate::config::Config;
 use crate::http::ApiError;
 use crate::owner::Owner;
+use crate::token::Scope;
 
 #[derive(Deserialize)]
 pub struct ArtifactQuery {
@@ -27,9 +29,7 @@ pub struct ArtifactQuery {
 }
 
 pub fn mint(cfg: &Config, owner: &Owner, path: &Path) -> std::io::Result<String> {
-    let mut raw = [0u8; 16];
-    getrandom::fill(&mut raw).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let token = format!("art_{}", hex(&raw));
+    let token = opaque("art_")?;
 
     let dir = cfg.root.join("artifacts");
     std::fs::create_dir_all(&dir)?;
@@ -50,6 +50,7 @@ pub fn mint(cfg: &Config, owner: &Owner, path: &Path) -> std::io::Result<String>
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
+    Extension(scope): Extension<Scope>,
     UrlPath(token): UrlPath<String>,
     Query(q): Query<ArtifactQuery>,
 ) -> Result<Response, ApiError> {
@@ -63,7 +64,7 @@ pub async fn handler(
         )
     };
 
-    if !is_token(&token) {
+    if !is_opaque(&token, "art_") {
         return Err(gone());
     }
     let record = std::fs::read_to_string(cfg.root.join("artifacts").join(format!("{token}.rec")))
@@ -78,6 +79,13 @@ pub async fn handler(
     match q.owner.as_deref() {
         Some(asked) if asked == owner => {}
         _ => return Err(gone()),
+    }
+    // And the owner has to be one this credential may name. The record's
+    // owner was valid when it was minted, so one that no longer parses is
+    // refused like everything else here.
+    let segments: Vec<String> = owner.split('/').map(str::to_string).collect();
+    if !Owner::parse(&segments).is_ok_and(|o| scope.allows(&o)) {
+        return Err(gone());
     }
     let bytes = std::fs::read(&path).map_err(|_| gone())?;
     let name = path
@@ -128,15 +136,23 @@ pub fn reap(root: &Path) -> usize {
         .count()
 }
 
-/// `art_` and exactly 32 lowercase hex characters. Checking the shape before
+/// `prefix` and 128 bits from the kernel's generator, as hex.
+pub fn opaque(prefix: &str) -> std::io::Result<String> {
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(format!("{prefix}{}", hex(&raw)))
+}
+
+/// `prefix` and exactly 32 lowercase hex characters. Checking the shape before
 /// touching the filesystem is what stops `art_../../etc/passwd` from becoming
 /// a filename.
-fn is_token(t: &str) -> bool {
-    t.len() == 36
-        && t.starts_with("art_")
-        && t.as_bytes()[4..]
-            .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+pub fn is_opaque(t: &str, prefix: &str) -> bool {
+    t.strip_prefix(prefix).is_some_and(|rest| {
+        rest.len() == 32
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 fn parse_record(s: &str) -> Option<(String, PathBuf, u64)> {

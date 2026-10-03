@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::owner::Owner;
+use crate::token::Scope;
 
 #[derive(Debug)]
 pub enum GuardError {
@@ -31,14 +32,19 @@ pub struct Guard {
     root: PathBuf,
     owner: Owner,
     inherit: bool,
+    scope: Scope,
 }
 
 impl Guard {
-    pub fn new(root: &Path, owner: &Owner, inherit: bool) -> Self {
+    /// The scope is not optional. `inherit` lends an ancestor's files, and an
+    /// ancestor above a scoped token's prefix belongs to another caller, so a
+    /// guard built without one would be the way around the token (issue #17).
+    pub fn new(root: &Path, owner: &Owner, inherit: bool, scope: &Scope) -> Self {
         Guard {
             root: root.to_path_buf(),
             owner: owner.clone(),
             inherit,
+            scope: scope.clone(),
         }
     }
 
@@ -75,6 +81,9 @@ impl Guard {
             let Some(a) = ancestors.get(hops - 1) else {
                 return Err(GuardError::Escapes(rel.into()));
             };
+            if !self.scope.allows(a) {
+                return Err(GuardError::Escapes(rel.into()));
+            }
             // An ancestor lends its own files, never a directory under them.
             // One component only, so there is no subtree to walk.
             if tail.len() != 1 {
@@ -215,7 +224,7 @@ mod tests {
         // A symlinked directory, so the escape is in a path segment not the leaf.
         std::os::unix::fs::symlink(f.ani.dir(&f.root), f.budi.dir(&f.root).join("hers")).unwrap();
 
-        let g = Guard::new(&f.root, &f.budi, false);
+        let g = Guard::new(&f.root, &f.budi, false, &Scope::Operator);
         let attacks: &[(&str, &str)] = &[
             ("parent then sibling", "../ani/secret.md"),
             ("many parents", "../../../../../../etc/passwd"),
@@ -242,7 +251,7 @@ mod tests {
     #[test]
     fn allows_the_owners_own_files() {
         let f = fixture("own");
-        let g = Guard::new(&f.root, &f.budi, false);
+        let g = Guard::new(&f.root, &f.budi, false, &Scope::Operator);
         // Issue #5: the answer is the canonicalised path that was checked, not
         // the spelling that was asked for.
         let want = fs::canonicalize(f.budi.dir(&f.root))
@@ -265,7 +274,7 @@ mod tests {
             fs::write(d.join("team.md"), b"ours").unwrap();
         }
 
-        let g = Guard::new(&f.root, &f.budi, true);
+        let g = Guard::new(&f.root, &f.budi, true, &Scope::Operator);
         // `..` is one step up the ownership tree, not a directory traversal.
         assert!(
             g.resolve("../team.md").is_ok(),
@@ -285,6 +294,36 @@ mod tests {
         );
     }
 
+    /// Issue #17. A scoped token lends the ancestors inside its prefix and
+    /// none above it, which belong to whoever holds the wider token.
+    #[test]
+    fn inherit_stops_at_the_scope() {
+        let f = fixture("inherit-scope");
+        for a in f.budi.ancestors() {
+            let d = a.dir(&f.root);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("team.md"), b"ours").unwrap();
+        }
+        let legal = Scope::Prefix(f.budi.ancestors()[0].clone());
+        let g = Guard::new(&f.root, &f.budi, true, &legal);
+        assert!(g.resolve("notes.md").is_ok());
+        assert!(
+            g.resolve("../team.md").is_ok(),
+            "acme/legal is inside the scope"
+        );
+        assert!(
+            g.resolve("../../team.md").is_err(),
+            "acme is above the scope"
+        );
+
+        let own = Guard::new(&f.root, &f.budi, true, &Scope::Prefix(f.budi.clone()));
+        assert!(own.resolve("notes.md").is_ok());
+        assert!(
+            own.resolve("../team.md").is_err(),
+            "the parent is above the scope"
+        );
+    }
+
     /// An ancestor grant stops at the ancestor's own files. Every directory
     /// under an ancestor is, or could become, another owner, so the subtree is
     /// closed rather than filtered.
@@ -295,7 +334,7 @@ mod tests {
         fs::create_dir(legal.join("shared")).unwrap();
         fs::write(legal.join("shared/template.md"), b"tmpl").unwrap();
 
-        let g = Guard::new(&f.root, &f.budi, true);
+        let g = Guard::new(&f.root, &f.budi, true, &Scope::Operator);
         // A plain subdirectory of the ancestor is closed, the same as a
         // sibling workspace, because the guard cannot tell them apart.
         assert!(
@@ -311,7 +350,7 @@ mod tests {
         let f = fixture("noinherit");
         let legal = f.budi.dir(&f.root).parent().unwrap().to_path_buf();
         fs::write(legal.join("team.md"), b"ours").unwrap();
-        assert!(Guard::new(&f.root, &f.budi, false)
+        assert!(Guard::new(&f.root, &f.budi, false, &Scope::Operator)
             .resolve("../team.md")
             .is_err());
     }
@@ -319,7 +358,7 @@ mod tests {
     #[test]
     fn an_absolute_path_is_its_own_error_code() {
         let f = fixture("abs");
-        let err = Guard::new(&f.root, &f.budi, false)
+        let err = Guard::new(&f.root, &f.budi, false, &Scope::Operator)
             .resolve("/etc/passwd")
             .unwrap_err();
         assert!(matches!(err, GuardError::Absolute(_)), "got {err:?}");
@@ -331,7 +370,7 @@ mod tests {
     #[test]
     fn a_symlink_planted_after_the_guard_was_built_is_still_refused() {
         let f = fixture("planted");
-        let g = Guard::new(&f.root, &f.budi, false);
+        let g = Guard::new(&f.root, &f.budi, false, &Scope::Operator);
 
         // First call: the path does not exist, but its parent does, so it
         // resolves. This is what lets a job create a new file.
@@ -384,7 +423,7 @@ mod tests {
             ),
         ];
         for (who, attempts) in cases {
-            let g = Guard::new(&f.root, who, true);
+            let g = Guard::new(&f.root, who, true, &Scope::Operator);
             for rel in attempts {
                 match g.resolve(rel) {
                     Err(_) => {}
@@ -407,7 +446,7 @@ mod tests {
     #[test]
     fn a_parent_step_is_refused_anywhere_but_the_front() {
         let f = fixture("hops");
-        let g = Guard::new(&f.root, &f.budi, true);
+        let g = Guard::new(&f.root, &f.budi, true, &Scope::Operator);
         for rel in [
             "sub/../notes.md",
             "notes.md/..",
@@ -424,7 +463,7 @@ mod tests {
     #[test]
     fn a_missing_parent_is_refused_rather_than_guessed() {
         let f = fixture("missing");
-        let g = Guard::new(&f.root, &f.budi, false);
+        let g = Guard::new(&f.root, &f.budi, false, &Scope::Operator);
         assert!(g.resolve("no/such/dir/file.txt").is_err());
     }
 }

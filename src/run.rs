@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 
 use crate::http::ApiJson;
 use serde::Deserialize;
@@ -18,6 +18,7 @@ use crate::guard::Guard;
 use crate::http::ApiError;
 use crate::owner::Owner;
 use crate::resolve::{guard_error, owner_or_error};
+use crate::token::Scope;
 
 #[derive(Deserialize)]
 pub struct RunRequest {
@@ -51,9 +52,10 @@ pub struct RunRequest {
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
+    Extension(scope): Extension<Scope>,
     ApiJson(req): ApiJson<RunRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let owner = owner_or_error(&req.owner)?;
+    let owner = owner_or_error(&scope, &req.owner)?;
     let limits = clamp_limits(&cfg, req.limits)?;
     let backend = pick_backend(&cfg, req.backend.as_deref())?;
     let network = parse_network(&req)?;
@@ -67,7 +69,7 @@ pub async fn handler(
 
     // Collect patterns are checked before the job runs, so a job never does
     // work only to be told afterwards that its output was unreachable.
-    let guard = Guard::new(&cfg.root, &owner, req.inherit);
+    let guard = Guard::new(&cfg.root, &owner, req.inherit, &scope);
     for pattern in &req.collect {
         check_pattern(&guard, pattern)?;
     }

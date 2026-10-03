@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 
 use crate::http::ApiJson;
 use serde::Deserialize;
@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::http::ApiError;
 use crate::resolve::owner_or_error;
+use crate::token::Scope;
 
 #[derive(Deserialize)]
 pub struct ForkRequest {
@@ -28,10 +29,12 @@ pub struct ForkRequest {
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
+    Extension(scope): Extension<Scope>,
     ApiJson(req): ApiJson<ForkRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let from = owner_or_error(&req.from)?;
-    let to = owner_or_error(&req.to)?;
+    // Both ends. A fork across two prefixes is a copy between tenants.
+    let from = owner_or_error(&scope, &req.from)?;
+    let to = owner_or_error(&scope, &req.to)?;
 
     let src = from.dir(&cfg.root);
     let dst = to.dir(&cfg.root);
