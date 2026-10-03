@@ -455,7 +455,17 @@ needs to start. Needs Linux 5.13 or later; refuses to run a job without it.
 Runs on a 1 GB VPS with nothing installed.
 
 **container**, `CORDON_BACKEND=container`. Needs Docker or podman, named by
-`CORDON_CONTAINER_CLI`. Never needs KVM or nested virtualisation. `--network none`,
+`CORDON_CONTAINER_CLI`. Never needs KVM or nested virtualisation.
+
+cordon does not pull images: pull `CORDON_IMAGE` yourself before pointing jobs
+at it. A job's stderr belongs to the job, and a pull in the middle of one puts
+registry progress in it. A missing image is a 503 `backend_unavailable` naming
+the command to run.
+
+Under podman the container gets `--userns keep-id`, because rootless podman maps
+container uids to host subuids and without it the job cannot write to its own
+bind-mounted sandbox. docker needs no equivalent: its daemon runs as root, so
+the uid in `--user` is a host uid already. `--network none`,
 `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
 `--pids-limit 128`, and a `noexec` tmpfs for scratch. The job runs as the
 daemon's own uid, which is what keeps the bind-mounted sandbox writable from both

@@ -27,8 +27,9 @@ pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError>
     let network = job.network.clone().unwrap_or_default();
     // Arguments are built before the runtime is probed, so a malformed host pin
     // is a request error rather than reported as the runtime being down.
-    let args = container_args(image, &job, &network, current_ids()?)?;
+    let args = container_args(cli, image, &job, &network, current_ids()?)?;
     cli_reachable(cli).await?;
+    image_present(cli, image).await?;
 
     let started = Instant::now();
     let mut child = Command::new(cli)
@@ -108,6 +109,7 @@ fn current_ids() -> Result<String, ExecError> {
 /// be asserted in a unit test with no Docker daemon anywhere near it, which is
 /// the only way these flags get reviewed on every change.
 pub fn container_args(
+    cli: &str,
     image: &str,
     job: &Job,
     network: &Network,
@@ -117,6 +119,11 @@ pub fn container_args(
         "run".into(),
         "--rm".into(),
         "-i".into(),
+        // The job's stderr is the job's. Without this the runtime's pull
+        // progress lands in it, which on a first run under podman meant six
+        // lines of registry chatter before the job had said anything.
+        "--pull".into(),
+        "never".into(),
         "--read-only".into(),
         "--user".into(),
         user,
@@ -135,6 +142,20 @@ pub fn container_args(
         "-w".into(),
         "/workspace".into(),
     ];
+    // Rootless podman maps container uids to host subuids, so --user 1001
+    // means uid 1001 inside the container and something else entirely on the
+    // host. The bind-mounted workspace is owned by the host user, so without
+    // keep-id the job cannot write to its own sandbox: measured on a Linux
+    // runner, where `printf > out.txt` came back "Permission denied". It
+    // passed on a Mac because podman machine maps differently, which is why
+    // CI runs both runtimes.
+    //
+    // docker has no equivalent and needs none: its daemon runs as root and the
+    // uid in --user is a host uid already.
+    if cli == "podman" {
+        a.push("--userns".into());
+        a.push("keep-id".into());
+    }
     a.extend(network_args(network)?);
 
     // The image and everything after it belong to the job, never to docker.
@@ -160,6 +181,34 @@ fn network_args(network: &Network) -> Result<Vec<String>, ExecError> {
             }
             Ok(a)
         }
+    }
+}
+
+/// cordon does not pull images. A job's stderr belongs to the job, and a pull
+/// in the middle of one puts registry progress in it, so `--pull never` is
+/// passed and the operator pulls `CORDON_IMAGE` beforehand.
+///
+/// Checked before the job rather than after, so a missing image is a clear
+/// backend error instead of a container that exits non-zero with runtime text
+/// in its output.
+async fn image_present(cli: &str, image: &str) -> Result<(), ExecError> {
+    let probe = Command::new(cli)
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    match tokio::time::timeout(Duration::from_secs(10), probe).await {
+        Ok(Ok(s)) if s.success() => Ok(()),
+        Ok(Ok(_)) => Err(ExecError::BackendUnavailable(format!(
+            "{image} is not present; cordon does not pull images, run `{cli} pull {image}` first"
+        ))),
+        Ok(Err(e)) => Err(ExecError::BackendUnavailable(format!(
+            "{cli} image inspect: {e}"
+        ))),
+        Err(_) => Err(ExecError::BackendUnavailable(format!(
+            "{cli} image inspect did not answer in 10s"
+        ))),
     }
 }
 
@@ -215,7 +264,7 @@ mod tests {
     }
 
     fn args_for(j: &Job, net: &Network) -> Vec<String> {
-        container_args("alpine:3.20", j, net, "1000:1000".into()).unwrap()
+        container_args(&cli(), "alpine:3.20", j, net, "1000:1000".into()).unwrap()
     }
 
     fn joined(j: &Job) -> String {
@@ -249,6 +298,39 @@ mod tests {
         ] {
             assert!(a.contains(want), "missing {want} in: {a}");
         }
+    }
+
+    /// Issue found by running the suite against podman on Linux: without
+    /// keep-id the job cannot write to its own bind-mounted sandbox.
+    #[test]
+    fn podman_gets_keep_id_and_docker_does_not() {
+        let j = job("true");
+        let pod = container_args(
+            "podman",
+            "alpine:3.20",
+            &j,
+            &Network::None,
+            "1000:1000".into(),
+        )
+        .unwrap()
+        .join(" ");
+        let doc = container_args(
+            "docker",
+            "alpine:3.20",
+            &j,
+            &Network::None,
+            "1000:1000".into(),
+        )
+        .unwrap()
+        .join(" ");
+        assert!(pod.contains("--userns keep-id"), "{pod}");
+        assert!(!doc.contains("--userns"), "{doc}");
+    }
+
+    /// The job's stderr is the job's, so the runtime never pulls during one.
+    #[test]
+    fn the_runtime_never_pulls_during_a_job() {
+        assert!(joined(&job("true")).contains("--pull never"));
     }
 
     #[test]
