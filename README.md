@@ -11,7 +11,9 @@ whether a path the model chose belongs to the session it came from.
 > nine more issues. All fourteen are fixed, each with a regression test, and
 > each closed issue carries its own reproducer and what changed. Read
 > [them](https://github.com/fajarhide/cordon/issues?q=is%3Aissue+is%3Aclosed)
-> before trusting any of this.
+> before trusting any of this. Several are counterexamples to designs that look
+> obviously right, and [#21](https://github.com/fajarhide/cordon/issues/21)
+> carries the two lessons that cost the most.
 >
 > The last one changed the API rather than the code. The egress allowlist
 > blocked name resolution and left every address reachable, measured on a real
