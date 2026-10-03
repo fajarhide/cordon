@@ -5,37 +5,27 @@
 cordon gives every user, team and AI agent its own sandbox on disk, and decides
 whether a path the model chose belongs to the session it came from.
 
-> ### v1 does not yet deliver that for every endpoint. Do not deploy it.
+> ### The five holes an adversarial review found are closed. Two things are still true.
 >
-> An adversarial review on 3 Oct 2026 broke the isolation claim in five places,
-> each with a reproducer. Tracked in [the open issues](https://github.com/fajarhide/cordon/issues):
+> A review on 3 Oct 2026 broke the isolation claim in five places. All five are
+> fixed and each has a regression test. What changed:
 >
-> - **`/v1/run` does not go through the guard at all.** The process backend only
->   sets the working directory, so a job can `cat ../other-owner/secret.md`. The
->   guard checks `collect` patterns and nothing else. This is the default backend.
-> - **An owner's own subtree includes its descendant owners.** `acme` reaches
->   `acme/legal/budi`, because the ownership tree is the directory tree. This one
->   hits the container backend too, and needs no job at all.
-> - **`CORDON_TOKEN` is read at startup and never checked on a request.** There
->   is no authentication. The daemon refuses to start on a public listener
->   without a token and then ignores it.
-> - **On a case-insensitive filesystem, `BUDI` is a different owner reading
->   `budi`'s files.** The Unicode reasoning was applied and case was missed.
-> - **`/v1/resolve` returns the unresolved path**, so the integration this README
->   recommends can be defeated by swapping a directory for a symlink between the
->   answer and the open.
+> - **`/v1/run` now has a filesystem boundary.** The process backend restricts itself with Landlock before it execs the job, so a job sees its own sandbox and the system paths it needs to start, and nothing else. Linux 5.13 or later. ([#1](https://github.com/fajarhide/cordon/issues/1))
+> - **An owner's files moved into a `.workspace` leaf**, so an owner's directory no longer contains its descendant owners. ([#2](https://github.com/fajarhide/cordon/issues/2))
+> - **`CORDON_TOKEN` is checked on every request** that can name an owner. ([#3](https://github.com/fajarhide/cordon/issues/3))
+> - **Uppercase is refused in an owner segment**, so a case-insensitive filesystem cannot collapse two owners into one. ([#4](https://github.com/fajarhide/cordon/issues/4))
+> - **`/v1/resolve` returns the canonicalised path it checked.** ([#5](https://github.com/fajarhide/cordon/issues/5))
 >
-> **`cordon verify` passes 9 of 9 against a daemon with every one of those holes
-> open.** It only probes `/v1/resolve` with two same-depth owners. It touches
-> `/v1/run`, `/v1/fork`, `/v1/artifact`, parent-child owner pairs, authentication
-> and backend selection not at all. Treat a green `cordon verify` as meaningless
-> until these are closed.
+> **On a machine without Landlock the process backend refuses to run a job at
+> all.** That means macOS, and any Linux kernel before 5.13. Use the container
+> backend there, or set `CORDON_UNSAFE_PROCESS_BACKEND=1` on a development box
+> and accept that there is no boundary. The refusal is the point: the old
+> behaviour was to run the job anyway.
 >
-> What does hold: every path-string attack against `/v1/resolve` between two
-> same-depth owners, which is what the 85 tests cover. That is a real but much
-> smaller claim than the one this README made.
-
-[![CI](https://github.com/fajarhide/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/fajarhide/cordon/actions/workflows/ci.yml)
+> **`cordon verify` is still too weak to trust as a clean bill of health.** It
+> probes `/v1/resolve` with two same-depth owners and nothing else, which is the
+> same blind spot that let #2 survive 85 tests. Seven lower severity findings are
+> also open. See [the open issues](https://github.com/fajarhide/cordon/issues).
 
 ## Quick start
 
@@ -309,26 +299,23 @@ async function readFile(session: Session, path: string) {
 `["org_42", "team_legal", "u_991"]`, a single `["u_991"]`. cordon does not care,
 as long as it is the same array every turn for the same user.
 
-**This example is currently unsafe, by the daemon's fault not yours.**
-`resolve` hands back the path as it was asked for rather than the one it
-validated, so a job that replaces a directory with a symlink between the answer
-and the `Bun.file()` call reads through it. Issue #5. Do not ship this shape
-until that is closed.
-
-A hierarchy like `["org_42", "team_legal", "u_991"]` is also the configuration
-issue #2 leaks, so `["u_991"]` is the only shape that is not affected by it
-today.
+`resolve` returns the canonicalised path it checked, so the name you open is the
+one that was approved. It is still not a capability: a component created between
+the answer and the open is outside what any path string can promise. For a job
+that writes files, prefer `/v1/run`, where the boundary is enforced on the
+process rather than agreed with it.
 
 ## Prove it on your own box
 
 `cordon verify` fires path-string attacks at a daemon you are already running
 and exits non-zero if one lands.
 
-**It is not a clean bill of health, and in v1 it is actively misleading.** It
-probes `/v1/resolve` with two same-depth owners and nothing else: not
-`/v1/run`, not a parent-child owner pair, not authentication, not backend
-selection. It passes against a daemon that leaks every owner's files. Keeping it
-out of your pipeline until the open issues are closed is the right call.
+**It is not yet a clean bill of health.** It probes `/v1/resolve` with two
+same-depth owners and nothing else: not `/v1/run`, not a parent-child owner
+pair, not authentication, not backend selection. Those are where the five
+critical findings lived, so a green run proves less than it looks like it does.
+Issue [#14](https://github.com/fajarhide/cordon/issues/14) lists the checks it
+needs before it earns the claim.
 
 ```
 $ cordon verify http://127.0.0.1:7777
@@ -356,14 +343,15 @@ The gaps are in the table too. A table of only wins is a table nobody believes.
 
 | | process backend | container backend |
 | --- | --- | --- |
-| one owner cannot read another's files | **no, see issue #1** | partly, see issue #2 |
+| one owner cannot read another's files | yes, Landlock, Linux 5.13+ | yes |
 | symlink out of the sandbox refused | yes | yes |
 | wall clock and output size capped | yes | yes |
 | memory capped | `RLIMIT_AS`, advisory on macOS | yes, cgroup |
-| filesystem outside the sandbox | readable | no, read-only root |
+| filesystem outside the sandbox | no, Landlock allowlist | no, read-only root |
 | network | **host network, wide open** | none by default |
 | egress allowlist | **refused, cannot honour it** | host level, not port level |
 | runs as root | as the daemon's user | no, and refuses if cordon is root |
+| available without Landlock | **no, the job is refused** | yes |
 | kernel level escape | shares the host kernel | shares the host kernel |
 
 Two rows to read twice. The **process backend has no network isolation**: it is
@@ -385,7 +373,10 @@ sandbox.
 
 **process**, the default. One process, working directory pinned to the sandbox,
 scrubbed environment, rlimits applied between fork and exec, its own session so
-a timeout takes the children too. Runs on a 1 GB VPS with nothing installed.
+a timeout takes the children too, and a Landlock ruleset applied to the child
+before it execs so its filesystem view is the sandbox plus the system paths it
+needs to start. Needs Linux 5.13 or later; refuses to run a job without it.
+Runs on a 1 GB VPS with nothing installed.
 
 **container**, `CORDON_BACKEND=container`. Needs Docker, or podman's docker
 alias. Never needs KVM or nested virtualisation. `--network none`,
@@ -399,7 +390,9 @@ container.
 
 If Docker is down, a container job answers 503 `backend_unavailable`. It never
 silently falls back to the process backend, because that hands a caller weaker
-isolation than it asked for without telling it.
+isolation than it asked for without telling it. For the same reason
+`CORDON_BACKEND` is a floor rather than a default: a request may ask for a
+stronger backend than the operator configured and never a weaker one.
 
 ## Configuration
 
@@ -413,6 +406,8 @@ isolation than it asked for without telling it.
 | `CORDON_ARTIFACT_TTL` | `24h` | `s`, `m`, `h` or `d` |
 | `CORDON_MAX_WALL_MS` | `60000` | ceiling a request may lower, never raise |
 | `CORDON_MAX_MEMORY_MB` | `1024` | same |
+| `CORDON_SYSTEM_PATHS` | `/usr:/bin:/sbin:/lib:/lib64:/etc:/dev/null:/dev/urandom:/dev/zero` | read and execute inside the Landlock boundary. Never add `/tmp` or `/var`: `CORDON_ROOT` usually lives under one |
+| `CORDON_UNSAFE_PROCESS_BACKEND` | unset | `1` lets the process backend run with no boundary. Development only, and every such job says so on its stderr |
 
 The daemon refuses to start on a listener the network can reach with no token.
 That is not a warning in a log, it is an exit.
@@ -424,7 +419,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 85 tests
+cargo test                                      # 101 tests
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -448,11 +443,13 @@ The budget is 20 MB and it is a test, not a sentence.
 
 ## Security
 
-85 tests, and four mutations each confirmed to break the suite. Read the scope
-honestly though: the tests cover `src/guard.rs` and `src/owner.rs` thoroughly,
-and those are not the layer that guards the data on `/v1/run`. That gap is issue
-#1, and it is the lesson rather than a footnote: a heavily tested module proves
-nothing about a code path that goes around it.
+101 tests, and four mutations each confirmed to break the suite.
+
+The lesson from the review is worth more than the count: the two modules with
+the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the
+layer guarding the data on `/v1/run`, which went around them entirely. A
+thoroughly tested module proves nothing about a code path that does not call
+it.
 
 | mutation | result |
 | --- | --- |

@@ -23,6 +23,9 @@ pub struct Job {
     pub stdin: String,
     pub limits: Limits,
     pub egress: Vec<String>,
+    /// Only consulted by the process backend, and only to decide whether a
+    /// missing filesystem boundary is fatal.
+    pub unsafe_process: bool,
 }
 
 #[derive(Debug)]

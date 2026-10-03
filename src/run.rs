@@ -73,6 +73,7 @@ pub async fn handler(
             stdin: req.stdin,
             limits,
             egress: req.egress,
+            unsafe_process: cfg.unsafe_process_backend,
         })
         .await
         .map_err(exec_error)?;
@@ -138,13 +139,29 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
     })
 }
 
+/// The operator's backend is a floor, not a default.
+///
+/// Issue #1b: this was `asked.unwrap_or(&cfg.backend)`, so a deployment
+/// configured for container isolation handed a caller the process backend for
+/// one extra JSON field. Limits already had a ceiling a request could only
+/// lower; isolation needs a floor a request can only raise.
 fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> {
-    match asked.unwrap_or(&cfg.backend) {
-        "process" => Ok(Backend::Process),
-        "container" => Ok(Backend::Container {
-            image: cfg.image.clone(),
-        }),
-        other => Err(ApiError::bad_request(
+    let container = Backend::Container {
+        image: cfg.image.clone(),
+    };
+    match (cfg.backend.as_str(), asked) {
+        (_, Some("container")) => Ok(container),
+        ("container", Some("process")) => Err(ApiError::bad_request(
+            "backend_below_floor",
+            "this daemon is configured for the container backend; a request cannot ask for a weaker one",
+        )),
+        ("container", _) => Ok(container),
+        (_, Some("process")) | ("process", None) => Ok(Backend::Process),
+        (_, Some(other)) => Err(ApiError::bad_request(
+            "invalid_request",
+            format!("backend {other:?} is not process or container"),
+        )),
+        (other, None) => Err(ApiError::bad_request(
             "invalid_request",
             format!("backend {other:?} is not process or container"),
         )),
@@ -388,6 +405,44 @@ mod tests {
             body["artifacts"].as_array().unwrap().len(),
             1,
             "nothing collected: {body}"
+        );
+    }
+
+    /// Issue #1b. A deployment configured for the container backend must not
+    /// hand out the process backend for one extra JSON field.
+    #[tokio::test]
+    async fn a_request_cannot_ask_for_a_weaker_backend_than_the_operator_set() {
+        let mut f = fixture("run-floor");
+        std::sync::Arc::get_mut(&mut f.cfg)
+            .expect("sole owner")
+            .backend = "container".into();
+
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","budi"],"entrypoint":"true","backend":"process"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "backend_below_floor", "{body}");
+    }
+
+    /// The other direction stays open: a process-configured daemon lets a
+    /// request ask for the stronger backend.
+    #[tokio::test]
+    async fn a_request_can_ask_for_a_stronger_backend_than_the_operator_set() {
+        let f = fixture("run-upgrade");
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","budi"],"entrypoint":"true","backend":"container"}"#,
+        )
+        .await;
+        // Either it runs, or docker is absent and it says so. What it must not
+        // be is a 400 refusing the upgrade.
+        assert!(
+            status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE,
+            "{status}: {body}"
         );
     }
 

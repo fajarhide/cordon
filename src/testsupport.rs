@@ -61,6 +61,9 @@ fn build(tag: &str, token: Option<String>) -> Fixture {
         artifact_ttl: std::time::Duration::from_secs(3600),
         max_wall_ms: 10_000,
         max_memory_mb: 256,
+        // See the note in the exec tests: the boundary exists on Linux only,
+        // so the suite enforces it there and runs without it elsewhere.
+        unsafe_process_backend: cfg!(not(target_os = "linux")),
     });
     Fixture { cfg, tmp }
 }

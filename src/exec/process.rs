@@ -24,6 +24,19 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
         ));
     }
 
+    // Issue #1: this used to be the whole of the isolation, a working
+    // directory and nothing else. The boundary is built here, in the parent
+    // where allocating is safe, and applied in the child with one syscall.
+    let boundary = crate::sandbox::Prepared::build(&job.workspace, &crate::sandbox::system_paths());
+    if let Some(why) = boundary.why_unavailable() {
+        if !job.unsafe_process {
+            return Err(ExecError::Unsupported(format!(
+                "refusing to run a job with no filesystem boundary: {why}. Use the container backend, or set CORDON_UNSAFE_PROCESS_BACKEND=1 if this is a development machine"
+            )));
+        }
+        eprintln!("cordon: WARNING no filesystem boundary for this job: {why}");
+    }
+
     let mut cmd = Command::new(&job.entrypoint);
     cmd.args(&job.args)
         .current_dir(&job.workspace)
@@ -36,12 +49,15 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    apply_limits(&mut cmd, &job);
+    apply_limits(&mut cmd, &job, boundary.raw_fd());
 
     let started = Instant::now();
     let mut child = cmd
         .spawn()
         .map_err(|e| ExecError::Spawn(format!("spawn {}: {e}", job.entrypoint)))?;
+    // The ruleset descriptor is only needed until the child has exec'd, which
+    // spawn has already waited for.
+    drop(boundary);
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.stdin.as_bytes()).await;
@@ -88,13 +104,22 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
 /// `pre_exec` runs in a forked process where only async-signal-safe calls are
 /// legal, which is why the closure does nothing but `setsid` and `setrlimit`.
 /// This is the one unsafe block in the crate.
-fn apply_limits(cmd: &mut Command, job: &Job) {
+fn apply_limits(cmd: &mut Command, job: &Job, boundary_fd: Option<i32>) {
     let memory_bytes = job.limits.memory_mb.saturating_mul(1024 * 1024);
     unsafe {
         cmd.pre_exec(move || {
             // Its own session, so a timeout can take the whole tree and not
             // just the shell that spawned it.
             libc::setsid();
+
+            // The filesystem boundary. Two syscalls on a descriptor the parent
+            // already built, which is all this context can safely do.
+            #[cfg(target_os = "linux")]
+            if let Some(fd) = boundary_fd {
+                crate::sandbox::linux::apply(fd)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = boundary_fd;
 
             set(libc::RLIMIT_CPU, 60);
             set(libc::RLIMIT_FSIZE, 1024 * 1024 * 1024);
@@ -156,6 +181,10 @@ mod tests {
                 stdout_kb: 64,
             },
             egress: vec![],
+            // Linux gets a real boundary from landlock, so CI enforces it.
+            // Everywhere else there is nothing to enforce, so the suite runs
+            // without one and the boundary itself is tested only on Linux.
+            unsafe_process: cfg!(not(target_os = "linux")),
         }
     }
 
@@ -244,6 +273,89 @@ mod tests {
             std::fs::read(ws.join("shared.txt")).unwrap().len(),
             8,
             "appends interleaved"
+        );
+    }
+
+    /// Issue #1. With no boundary available the backend refuses rather than
+    /// running the job anyway, which is what it used to do on every platform.
+    #[tokio::test]
+    async fn no_boundary_and_no_override_means_the_job_does_not_run() {
+        let mut j = job(tmp("noboundary"), "echo hello");
+        j.unsafe_process = false;
+
+        let result = Backend::Process.run(j).await;
+
+        // On Linux the boundary is real, so the job runs. A kernel without
+        // landlock lands in the refusal arm, which is also correct.
+        #[cfg(target_os = "linux")]
+        match result {
+            Ok(out) => assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr),
+            Err(ExecError::Unsupported(m)) => {
+                assert!(m.contains("filesystem boundary"), "unhelpful refusal: {m}")
+            }
+            Err(e) => panic!("wrong error: {e:?}"),
+        }
+
+        // Anywhere else there is no boundary to have, so running the job at
+        // all would be the bug.
+        #[cfg(not(target_os = "linux"))]
+        match result {
+            Err(ExecError::Unsupported(m)) => {
+                assert!(m.contains("filesystem boundary"), "unhelpful refusal: {m}")
+            }
+            Ok(out) => panic!("a job ran with no boundary on a platform that has none: {out:?}"),
+            Err(e) => panic!("wrong error: {e:?}"),
+        }
+    }
+
+    /// Issue #1, the actual claim. A job must not read another owner's file.
+    ///
+    /// Linux only, because landlock is the thing being tested and there is
+    /// nothing to test anywhere else. CI runs on Linux for exactly this.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_job_cannot_read_another_owners_file() {
+        use crate::owner::Owner;
+
+        let root = tmp("crossowner");
+        let budi = Owner::parse(&["acme".into(), "budi".into()]).unwrap();
+        let ani = Owner::parse(&["acme".into(), "ani".into()]).unwrap();
+        std::fs::create_dir_all(budi.dir(&root)).unwrap();
+        std::fs::create_dir_all(ani.dir(&root)).unwrap();
+        std::fs::write(ani.dir(&root).join("secret.md"), b"ANI-SECRET").unwrap();
+
+        // Every shape the review used, run from inside the job rather than
+        // through the guard, because the guard is not what was broken.
+        let script = "\
+            cat ../../ani/.workspace/secret.md 2>&1;
+            cat ../../../owners/acme/ani/.workspace/secret.md 2>&1;
+            find / -name secret.md 2>/dev/null | head -5;
+            ls ../.. 2>&1;
+            cat /etc/passwd > /dev/null 2>&1 && echo READ-ETC-PASSWD;
+            echo DONE";
+
+        let mut j = job(budi.dir(&root), script);
+        j.unsafe_process = false;
+        let out = Backend::Process.run(j).await.expect("the job should run");
+
+        assert!(out.stdout.contains("DONE"), "the job never ran: {out:?}");
+        assert!(
+            !out.stdout.contains("ANI-SECRET"),
+            "a job read another owner's file:\n{}",
+            out.stdout
+        );
+        assert!(
+            !out.stdout.contains("/secret.md"),
+            "a job found another owner's file by walking the filesystem:\n{}",
+            out.stdout
+        );
+        // And it can still work inside its own sandbox.
+        let mut j2 = job(budi.dir(&root), "printf mine > own.txt; cat own.txt");
+        j2.unsafe_process = false;
+        let own = Backend::Process.run(j2).await.unwrap();
+        assert_eq!(
+            own.stdout, "mine",
+            "a job cannot use its own sandbox: {own:?}"
         );
     }
 

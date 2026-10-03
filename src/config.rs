@@ -20,6 +20,7 @@ pub const KEYS: &[&str] = &[
     "CORDON_ARTIFACT_TTL",
     "CORDON_MAX_WALL_MS",
     "CORDON_MAX_MEMORY_MB",
+    "CORDON_UNSAFE_PROCESS_BACKEND",
 ];
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,10 @@ pub struct Config {
     pub artifact_ttl: Duration,
     pub max_wall_ms: u64,
     pub max_memory_mb: u64,
+    /// Lets the process backend run with no filesystem boundary. Linux gets a
+    /// real one from landlock; everywhere else this is the only way /v1/run
+    /// works at all, which is why it is development only and says so.
+    pub unsafe_process_backend: bool,
 }
 
 impl Config {
@@ -45,6 +50,8 @@ impl Config {
             artifact_ttl: parse_duration(&env("CORDON_ARTIFACT_TTL", "24h"))?,
             max_wall_ms: env_u64("CORDON_MAX_WALL_MS", 60_000),
             max_memory_mb: env_u64("CORDON_MAX_MEMORY_MB", 1024),
+            unsafe_process_backend: std::env::var("CORDON_UNSAFE_PROCESS_BACKEND").as_deref()
+                == Ok("1"),
         };
         if cfg.backend != "process" && cfg.backend != "container" {
             return Err(format!(
