@@ -39,8 +39,27 @@ jobs:
       - name: Pull the sandbox image
         run: docker pull alpine:3.20
 
+      # CORDON_REQUIRE_DOCKER turns a skipped container test into a failure, so
+      # coverage cannot quietly lapse on a runner that has a runtime. It was
+      # reported as being here once before and was not: a scripted edit failed
+      # silently and nobody checked the file.
       - name: Test
         run: cargo test -- --nocapture
+        env:
+          CORDON_REQUIRE_DOCKER: "1"
+
+      # podman is a documented runtime now rather than a hopeful alias, so it
+      # gets its own run. It broke once already: cordon called docker
+      # unconditionally, and the old egress allowlist's host-gateway pin failed
+      # the container outright under rootless podman with netavark.
+      - name: Install podman
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq podman
+
+      - name: Container tests against podman
+        run: cargo test --bin cordon exec::container -- --nocapture
+        env:
+          CORDON_CONTAINER_CLI: podman
+          CORDON_REQUIRE_DOCKER: "1"
 
   guarantee:
     name: The guarantee, end to end
