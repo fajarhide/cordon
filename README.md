@@ -629,7 +629,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 133 tests
+cargo test                                      # 134 tests on Linux, 133 elsewhere
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -685,7 +685,7 @@ small.
 
 ## Security
 
-133 tests, and four mutations each confirmed to break the suite.
+134 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the

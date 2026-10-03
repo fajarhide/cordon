@@ -1,7 +1,4 @@
-//! Test only helpers, compiled out of the release binary entirely.
-//!
-//! Four endpoint suites ask the same question of the same shape, so the
-//! fixture is built once here rather than copied into each of them.
+//! Test only helpers: one fixture shared by the endpoint suites, compiled out of release.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,13 +22,11 @@ impl Drop for Fixture {
     }
 }
 
-/// Two owners under one root: acme/budi holding notes.md, acme/ani holding
-/// secret.md. Every endpoint test starts from this and tries to cross it.
+/// Two owners under one root: acme/budi holding notes.md, acme/ani holding secret.md.
 pub fn fixture(tag: &str) -> Fixture {
     build(tag, None)
 }
 
-/// The same fixture with a bearer token configured, for the auth tests.
 pub fn fixture_with_token(tag: &str, token: &str) -> Fixture {
     build(tag, Some(token.to_string()))
 }
@@ -41,10 +36,7 @@ fn build(tag: &str, token: Option<String>) -> Fixture {
     tmp.push(format!("cordon-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
 
-    // Built through Owner::dir rather than a hardcoded path, so a change to the
-    // on-disk layout cannot leave the fixture describing the old one. The
-    // previous version spelled owners/acme/budi by hand and went stale the
-    // moment the workspace leaf arrived.
+    // Built through Owner::dir, so a change to the on-disk layout cannot leave the fixture stale.
     std::fs::create_dir_all(owner_dir(&tmp, &["acme", "budi"])).expect("fixture dirs");
     std::fs::create_dir_all(owner_dir(&tmp, &["acme", "ani"])).expect("fixture dirs");
     std::fs::write(owner_dir(&tmp, &["acme", "budi"]).join("notes.md"), b"mine")
@@ -62,8 +54,7 @@ fn build(tag: &str, token: Option<String>) -> Fixture {
         artifact_ttl: std::time::Duration::from_secs(3600),
         max_wall_ms: 10_000,
         max_memory_mb: 256,
-        // See the note in the exec tests: the boundary exists on Linux only,
-        // so the suite enforces it there and runs without it elsewhere.
+        // The boundary exists on Linux only, so the suite runs without it elsewhere.
         unsafe_process_backend: cfg!(not(target_os = "linux")),
     });
     Fixture { cfg, tmp }
@@ -76,13 +67,11 @@ pub fn owner_dir(root: &std::path::Path, segments: &[&str]) -> PathBuf {
         .dir(root)
 }
 
-/// Posts through the real router, so a test exercises routing, extraction and
-/// the error shape rather than calling a handler function directly.
+/// Posts through the real router, so routing, extraction and the error shape are exercised.
 pub async fn post(f: &Fixture, uri: &str, payload: &str) -> (StatusCode, Value) {
     post_auth(f, uri, payload, None).await
 }
 
-/// Posts with an explicit Authorization header value, or none at all.
 pub async fn post_auth(
     f: &Fixture,
     uri: &str,
@@ -92,7 +81,6 @@ pub async fn post_auth(
     post_typed(f, uri, payload, auth, Some("application/json")).await
 }
 
-/// The same, with explicit control of the content type, including none at all.
 pub async fn post_typed(
     f: &Fixture,
     uri: &str,

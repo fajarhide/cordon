@@ -94,7 +94,6 @@ def tick(x, y, colour, opacity=1.0):
     )
 
 
-# Fixed geometry.
 APP = (56, 232, 190, 96)
 DAEMON = (330, 70, 400, 420)
 GUARD = (362, 150, 336, 92)
@@ -116,7 +115,6 @@ def frame(i: int) -> str:
     else:
         beat, t = 3, (i - B2) / (B3 - B2)
 
-    # The daemon enclosure.
     x, y, w, h = DAEMON
     s.append(
         f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="16" fill="#232334" '
@@ -147,7 +145,6 @@ def frame(i: int) -> str:
                  "a sibling", dim=0.9))
     s.append(label(BUDI[0] + BUDI[2] / 2, 118, "sandboxes on disk", SUBT, 13, anchor="middle"))
 
-    # Static rails.
     s.append(f'<line x1="246" y1="280" x2="356" y2="200" stroke="{LINE}" stroke-width="1.5" stroke-dasharray="5 5"/>')
     s.append(f'<line x1="698" y1="200" x2="824" y2="216" stroke="{LINE}" stroke-width="1.5" stroke-dasharray="5 5"/>')
     s.append(f'<line x1="698" y1="333" x2="824" y2="250" stroke="{LINE}" stroke-width="1.5" stroke-dasharray="5 5"/>')
@@ -201,8 +198,7 @@ def frame(i: int) -> str:
             px, py = along((530, 242), (618, 288), u)
             s.append(packet(px, py, BLUE))
         else:
-            # The job writes into its own sandbox, and its own attempt at the
-            # sibling is stopped by the kernel rather than by a check.
+            # The sibling attempt is stopped by the kernel, not by a check.
             u = ease(min(1.0, (t - 0.44) / 0.22))
             px, py = along((698, 333), (870, 250), u)
             s.append(packet(px, py, GREEN))
@@ -218,9 +214,7 @@ def frame(i: int) -> str:
                 s.append(label(975, 452, "landlock: the job cannot see a sibling", RED, 13,
                                anchor="middle", opacity=k))
             if t > 0.78:
-                # The output goes back to the caller as a token, never a path,
-                # so it travels the whole way to the app rather than stopping
-                # inside the daemon.
+                # Output goes back as a token, never a path, so it travels all the way to the app.
                 k = min(1.0, (t - 0.78) / 0.12)
                 u = ease(min(1.0, (t - 0.78) / 0.20))
                 bx = 900 - (900 - 150) * u

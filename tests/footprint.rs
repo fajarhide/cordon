@@ -1,17 +1,10 @@
-//! The 20 MB claim in the spec, asserted rather than asserted in prose.
-//!
-//! The first version of this test accepted any reading above zero, which let a
-//! bogus measurement pass: it once reported 32 KB for a daemon whose real RSS
-//! was 2768 KB, and went green. A test that carries a claim has to fail when it
-//! cannot measure, not when the number happens to be small.
+//! Asserts the spec's 20 MB claim. It must fail when it cannot measure, not pass a bogus reading.
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const PORT: &str = "7791";
-/// A daemon that has bound a socket and served 50 requests cannot plausibly be
-/// under a megabyte, so a reading below this means the measurement is wrong
-/// rather than the daemon being small.
+/// A serving daemon cannot be under a megabyte, so a lower reading is a measurement error.
 const FLOOR_KB: u64 = 1_000;
 const CEILING_KB: u64 = 20 * 1024;
 
@@ -40,8 +33,7 @@ fn the_daemon_stays_under_twenty_megabytes_while_serving() {
         panic!("the daemon never answered /v1/health on port {PORT}, so nothing was measured");
     }
 
-    // Measured while serving, not at rest: a request builds the router state
-    // and allocates, and that is the number an operator cares about.
+    // Measured while serving, not at rest: that is the number an operator cares about.
     for _ in 0..50 {
         let _ = Command::new("curl")
             .args([
@@ -58,8 +50,7 @@ fn the_daemon_stays_under_twenty_megabytes_while_serving() {
             .status();
     }
 
-    // Still alive, so the reading below belongs to a process that is serving
-    // rather than one that fell over partway through.
+    // Still alive, so the reading belongs to a serving process, not one that fell over.
     if !health_ok() {
         cleanup(&mut child, &root);
         panic!("the daemon stopped answering during the load, so the reading would be meaningless");

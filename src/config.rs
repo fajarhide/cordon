@@ -1,9 +1,5 @@
-//! Settings, read once at startup from the environment.
-//!
-//! Every setting has a working default so cordon starts with no configuration
-//! and still gives the isolation guarantee. The listener is the one setting
-//! that can refuse to start the daemon, because a listener the network can
-//! reach with no token is not a default anyone chose on purpose.
+//! Settings, read once at startup from the environment. Every one has a working default.
+//! Only the listener can refuse to start: one the network can reach needs a token.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -36,9 +32,7 @@ pub struct Config {
     pub artifact_ttl: Duration,
     pub max_wall_ms: u64,
     pub max_memory_mb: u64,
-    /// Lets the process backend run with no filesystem boundary. Linux gets a
-    /// real one from landlock; everywhere else this is the only way /v1/run
-    /// works at all, which is why it is development only and says so.
+    /// Process backend with no filesystem boundary, for development: only Linux has landlock.
     pub unsafe_process_backend: bool,
 }
 
@@ -73,9 +67,7 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Refuses to start on an address other machines can reach unless a token
-    /// is set. Starting anyway hands every caller on the network the ability to
-    /// name any owner it likes, which is the whole guarantee gone.
+    /// Without a token, any caller on the network could name any owner, so refuse to start.
     fn require_token_if_public(&self) -> Result<(), String> {
         let Some(addr) = self.listen.strip_prefix("tcp:") else {
             return Ok(());
@@ -109,13 +101,9 @@ fn split_host(addr: &str) -> Option<&str> {
     (!port.is_empty()).then_some(host)
 }
 
-/// A deliberately small duration grammar: seconds, minutes, hours, days.
-/// Pulling in a date library to read "24h" is not a trade worth making.
+/// Seconds, minutes, hours, days. Reading "24h" is not worth a date library.
 fn parse_duration(s: &str) -> Result<Duration, String> {
-    // Split on the last char, not the last byte. `24h\u{20ac}` used to panic
-    // here on a char boundary and take the daemon down at startup with a
-    // backtrace instead of the clear error every other setting produces
-    // (issue #12).
+    // Split on the last char, not byte: a multibyte unit must be an error, not a panic (#12).
     let split = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
     let (digits, unit) = s.split_at(split);
     let n: u64 = digits.parse().map_err(|_| {
@@ -154,8 +142,7 @@ fn env_u64(key: &str, fallback: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Every test mutates process environment, so they share one lock rather
-    /// than racing each other under the default parallel test runner.
+    /// Tests mutate the process environment, so they share one lock under the parallel runner.
     fn with_env<T>(pairs: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -218,8 +205,7 @@ mod tests {
             .expect_err("an unknown backend must refuse to start");
     }
 
-    /// Issue #12. This used to panic on a char boundary and take the daemon
-    /// down at startup with a backtrace rather than an error.
+    /// A multibyte unit must be refused cleanly (#12).
     #[test]
     fn a_multibyte_ttl_is_an_error_not_a_panic() {
         for v in ["24h\u{20ac}", "\u{20ac}", "24\u{65e5}", "\u{1f600}"] {

@@ -1,25 +1,5 @@
-//! `cordon verify` proves the guarantee against a running daemon, so an
-//! operator does not have to trust the README.
-//!
-//! Issue #14: the first version posted nine path strings to `/v1/resolve` with
-//! two owners at the same depth, and passed against a daemon that leaked every
-//! owner's file through `/v1/run`, had no working authentication and let a
-//! caller downgrade the backend. It inherited the test suite's blind spot
-//! because both were written from the same mental model.
-//!
-//! So it now exercises the data plane: it writes a secret as one owner and has
-//! another owner's job try to read it, by every shape the review used. A check
-//! it cannot run reports as skipped rather than passed, because a probe that
-//! silently counts an untested property as a win is worse than no probe.
-//!
-//! It speaks HTTP with hand written requests rather than taking a client
-//! dependency. It runs once, by hand or in a pipeline, and reads a handful of
-//! fields.
-//!
-//! Its probes live under the owner prefix `cordon-verify`, which is reserved
-//! for it. There is no endpoint that deletes an owner, so they stay on disk
-//! unless `--root` names the daemon's `CORDON_ROOT`, in which case verify
-//! removes them itself once the run has passed (issue #20).
+//! `cordon verify` proves the isolation against a running daemon through the data plane (#14).
+//! Probes live under the reserved owner prefix `cordon-verify`; `--root` removes them (#20).
 
 use std::io::Write;
 use std::path::Path;
@@ -32,8 +12,7 @@ use crate::style::Style;
 pub enum Outcome {
     Pass,
     Fail,
-    /// The property could not be tested here, with the reason. Never counted
-    /// as a pass.
+    /// Could not be tested here, with the reason. Never counted as a pass.
     Skip(String),
 }
 
@@ -65,13 +44,8 @@ impl Check {
             detail: String::new(),
         }
     }
-    /// A refusal counts only as a 4xx carrying a code. A bodiless 403 from a
-    /// proxy in front of a broken daemon proves nothing.
-    ///
-    /// `unauthorized` is explicitly not a pass. A daemon that refuses every
-    /// request for want of a token tells us nothing about how it handles
-    /// paths, and counting that as a win is the same false assurance this
-    /// whole rewrite exists to remove.
+    /// A refusal counts only as a 4xx carrying a code: a bodiless 403 from a proxy proves nothing.
+    /// `unauthorized` is a skip, since refusing for want of a token says nothing about paths.
     fn refused(name: &'static str, status: u16, body: &str) -> Self {
         let code = json_string(body, "code");
         match code.as_deref() {
@@ -102,7 +76,7 @@ const DATA_PLANE_NAMES: [&str; 6] = [
     "a zero memory limit is refused",
 ];
 
-/// Issue #17, and named once for the same reason.
+/// Named once for the same reason (#17).
 const SCOPE_NAMES: [&str; 7] = [
     "scoped: its own prefix works",
     "scoped: another owner refused",
@@ -113,8 +87,7 @@ const SCOPE_NAMES: [&str; 7] = [
     "scoped: cannot issue tokens",
 ];
 
-/// Path strings posted to `/v1/resolve`, each a thing a confused or hostile
-/// caller actually sends.
+/// Path strings posted to `/v1/resolve`, each one a confused or hostile caller actually sends.
 const PATH_ATTEMPTS: &[(&str, &str)] = &[
     (
         "parent traversal",
@@ -184,8 +157,7 @@ pub async fn run(addr: &str, token: Option<&str>) -> Result<Vec<Check>, String> 
         token: token.map(str::to_string),
     };
 
-    // Liveness first: everything below is meaningless against a daemon that
-    // is not answering, and a connection error should say so once.
+    // Liveness first, so a dead daemon is reported once rather than per check.
     let (status, _) = c.get("/v1/health").await?;
     if status != 200 {
         return Err(format!("/v1/health answered {status}"));
@@ -195,9 +167,7 @@ pub async fn run(addr: &str, token: Option<&str>) -> Result<Vec<Check>, String> 
     let (auth, usable) = auth_checks(&c).await?;
     out.extend(auth);
 
-    // Everything below needs a request the daemon will actually answer. With
-    // no usable credentials every check would come back 401, which is a 4xx
-    // with a code and would have read as a pass.
+    // Without usable credentials every check is a 401, which must not read as a refusal.
     if !usable {
         let why = "no usable credentials for this daemon; pass a token as the second argument or in CORDON_TOKEN".to_string();
         out.extend(
@@ -220,8 +190,7 @@ pub async fn run(addr: &str, token: Option<&str>) -> Result<Vec<Check>, String> 
 async fn auth_checks(c: &Client) -> Result<(Vec<Check>, bool), String> {
     let body = r#"{"owner":["cordon-verify","a"],"path":"x.md"}"#;
 
-    // Whether a token is configured is discovered rather than assumed: a
-    // request with no credentials either works or does not.
+    // Whether a token is configured is discovered, not assumed.
     let bare = Client {
         host: c.host.clone(),
         token: None,
@@ -240,8 +209,7 @@ async fn auth_checks(c: &Client) -> Result<(Vec<Check>, bool), String> {
                 Check::skip("no credentials refused", why),
                 Check::skip("a wrong token refused", why),
             ],
-            // An open daemon is fine to probe; one that wants a token we do
-            // not have is not.
+            // An open daemon is fine to probe; one that wants a token we lack is not.
             !needs_token,
         ));
     }
@@ -277,20 +245,16 @@ async fn path_checks(c: &Client) -> Result<Vec<Check>, String> {
     Ok(out)
 }
 
-/// The checks the first version of this tool did not have, and the ones the
-/// review's critical findings lived behind.
+/// Goes through `/v1/run` and artifacts, which the path checks cannot see (#14).
 async fn data_plane_checks(c: &Client) -> Result<Vec<Check>, String> {
     let names = DATA_PLANE_NAMES;
 
-    // Owner b writes the secret. If /v1/run cannot run here at all, every
-    // check below is unprovable and says so.
+    // Owner b writes the secret. If /v1/run cannot run here, the checks that need it skip.
     let seed = format!(
         r#"{{"owner":{OWNER_B},"entrypoint":"sh","args":["-c","printf {SECRET} > secret.md"],
              "limits":{{"wall_ms":10000,"memory_mb":128,"stdout_kb":16}}}}"#
     );
-    // These two are refused before any job runs, so they do not need the seed
-    // and must not be skipped when it fails. An earlier version gated every
-    // check on the seed, which hid both of them behind a missing image.
+    // These two are refused before any job runs, so they must not be gated on the seed.
     let mut out = vec![floor_check(c).await?, zero_memory_check(c).await?];
 
     let (status, raw) = c.post("/v1/run", &seed).await?;
@@ -303,8 +267,7 @@ async fn data_plane_checks(c: &Client) -> Result<Vec<Check>, String> {
         return Ok(out);
     }
 
-    // Owner a's job goes at it directly, bypassing the path layer entirely,
-    // which is exactly what issue #1 was.
+    // Owner a's job goes at it directly, bypassing the path layer (#1).
     let attack = format!(
         r#"{{"owner":{OWNER_A},"entrypoint":"sh","args":["-c",
              "cat ../../b/.workspace/secret.md 2>&1; cat ../b/secret.md 2>&1; find / -name secret.md 2>/dev/null | head -3; echo VERIFY-DONE"],
@@ -377,10 +340,7 @@ async fn data_plane_checks(c: &Client) -> Result<Vec<Check>, String> {
 }
 
 /// A token scoped to owner a, pointed at everything that is not owner a.
-///
-/// Written against the data the earlier checks left on disk rather than
-/// against the scope rule: b's secret is there, so the question asked is
-/// whether a's token can get at it, by each endpoint that names an owner.
+/// Relies on b's secret, which the data plane checks left on disk.
 async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
     let names = SCOPE_NAMES;
     let skip_all =
@@ -406,8 +366,7 @@ async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
         }
     };
 
-    // A refusal only counts when it is the scope refusing. Any other code is
-    // a request that failed for its own reasons and proves nothing here.
+    // Only a scope refusal counts. Any other code failed for its own reasons and proves nothing.
     let outside = |name: &'static str, status: u16, raw: &str| {
         if raw.contains(SECRET) {
             return Check::fail(name, "the scoped token read another owner's file");
@@ -428,8 +387,7 @@ async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
     };
     let mut out = Vec::with_capacity(names.len());
 
-    // Inside the prefix first, so the refusals below are not a daemon that
-    // refuses this token everything.
+    // Inside the prefix first, to rule out a daemon that refuses this token everything.
     let (status, _) = scoped
         .post(
             "/v1/resolve",
@@ -466,8 +424,7 @@ async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
         .await?;
     out.push(outside(names[3], status, &raw));
 
-    // The parent owner gets a file, the operator reads it through inherit to
-    // show the reach is real, and then the scoped token asks for the same.
+    // The operator reads the parent's file through inherit first, to show the reach is real.
     let plant = r#"{"owner":["cordon-verify"],"entrypoint":"sh","args":["-c","printf shared > shared.md"],
                     "limits":{"wall_ms":10000,"memory_mb":128,"stdout_kb":16}}"#;
     let up = r#"{"owner":["cordon-verify","a"],"path":"../shared.md","inherit":true}"#;
@@ -501,7 +458,7 @@ async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
     Ok(out)
 }
 
-/// The backend floor only means something on a container-configured daemon.
+/// The floor only means something on a container-configured daemon, so a process one skips.
 /// Refused before any job runs, so it needs no seed.
 async fn floor_check(c: &Client) -> Result<Check, String> {
     let name = DATA_PLANE_NAMES[4];
@@ -561,9 +518,7 @@ pub fn report(checks: &[Check], w: &mut impl Write, s: Style) -> bool {
         );
         return false;
     }
-    // Nothing failed and nothing passed either. A pipeline reading exit 0 as
-    // success here is back to the false assurance this tool was rewritten to
-    // remove, so an all-skip run is not a success.
+    // An all-skip run tested nothing, so a pipeline must not see it as a success.
     if passed == 0 {
         let _ = writeln!(
             w,
@@ -575,8 +530,7 @@ pub fn report(checks: &[Check], w: &mut impl Write, s: Style) -> bool {
         return false;
     }
     if skipped > 0 {
-        // Said plainly, because a skip is an untested property and reading
-        // this output as a clean bill of health is how #14 happened.
+        // A skip is an untested property, so the summary must not read as a clean pass (#14).
         let _ = writeln!(
             w,
             "{} {}",
@@ -591,10 +545,8 @@ pub fn report(checks: &[Check], w: &mut impl Write, s: Style) -> bool {
     true
 }
 
-/// Removes the probe workspaces, or says plainly that they are still there.
-///
-/// Only after a pass. A failed run is the one time somebody wants to look at
-/// what the probes left on disk.
+/// Removes the probe workspaces, or says that they are still there (#20).
+/// Only after a pass: a failed run is when somebody wants to inspect them.
 pub fn tidy(root: Option<&Path>, passed: bool, w: &mut impl Write, s: Style) {
     let msg = match root {
         None => "Workspaces under the reserved owner prefix cordon-verify, and the token scoped to it, are left behind. Pass --root <CORDON_ROOT> to remove them.".to_string(),
@@ -602,17 +554,14 @@ pub fn tidy(root: Option<&Path>, passed: bool, w: &mut impl Write, s: Style) {
             "The run did not pass, so the cordon-verify workspaces were kept for inspection.".to_string()
         }
         Some(root) => {
-            // The scoped token verify issued for itself, and any an earlier
-            // run left. Matched on the whole prefix, so a real owner called
-            // cordon-verify-something keeps its tokens.
+            // Whole-prefix match, so an owner named cordon-verify-something keeps its tokens.
             for e in std::fs::read_dir(root.join("tokens")).into_iter().flatten().flatten() {
                 if std::fs::read_to_string(e.path()).is_ok_and(|s| s.trim_end() == "cordon-verify/a") {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
             let probes = root.join("owners").join("cordon-verify");
-            // A missing directory is not a success: the usual cause is a path
-            // that is not the root of the daemon that was just probed.
+            // A missing directory usually means the wrong root, so it is not called a success.
             if !probes.is_dir() {
                 format!(
                     "Nothing to remove at {}. Is that the CORDON_ROOT of the daemon that was probed?",
@@ -694,8 +643,7 @@ impl Client {
     }
 }
 
-/// Pulls one string value out of a JSON body without a parser. verify reads a
-/// handful of fields and runs once, so the dependency is not worth it.
+/// Pulls one string value out of a JSON body. A few fields do not justify a parser dependency.
 fn json_string(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\":\"");
     let start = body.find(&needle)? + needle.len();
@@ -708,8 +656,7 @@ fn json_string(body: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A stub that answers everything the same way, which is enough to pin how
-    /// the checks read a response.
+    /// A stub that answers every request but health the same way.
     async fn serve(body: &'static str, status: u16) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = format!("http://{}", listener.local_addr().unwrap());
@@ -719,8 +666,7 @@ mod tests {
                 let n = sock.read(&mut buf).await.unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                // Health always answers, because verify checks liveness first
-                // and a stub that refuses it never reaches the real checks.
+                // Health always answers, or verify stops at liveness and reaches no check.
                 let (status, body) = if req.contains("/v1/health") {
                     (200u16, r#"{"status":"ok"}"#.to_string())
                 } else {
@@ -751,12 +697,8 @@ mod tests {
         (checks.len() - f - s, f, s)
     }
 
-    /// A daemon that refuses everything cannot have its data plane exercised,
-    /// so those checks must skip rather than pass.
-    ///
-    /// Asserted on the skips rather than on "nothing failed". The blanket 403
-    /// this stub returns is a genuine failure for the backend floor probe,
-    /// which expects a 400 with its own code, and verify is right to say so.
+    /// Asserts on the skips, not on "nothing failed": the blanket 403 is a genuine failure
+    /// for the backend floor probe, which expects a 400 with its own code.
     #[tokio::test]
     async fn a_daemon_that_refuses_everything_cannot_prove_its_data_plane() {
         let addr = serve(
@@ -777,8 +719,7 @@ mod tests {
                 "{name} did not skip against a daemon that refuses everything"
             );
         }
-        // And nothing in the path layer failed, since every one of those is a
-        // refusal carrying a code.
+        // Every path check got a refusal carrying a code, so none of them fails.
         for (name, _) in PATH_ATTEMPTS {
             let c = checks.iter().find(|c| &c.name == name).unwrap();
             assert!(
@@ -797,8 +738,7 @@ mod tests {
         assert!(failed > 0, "a permissive daemon passed every check");
     }
 
-    /// A 403 with an empty body proves nothing: that is what a reverse proxy in
-    /// front of a broken daemon returns.
+    /// A bodiless 403 is what a reverse proxy in front of a broken daemon returns.
     #[tokio::test]
     async fn a_refusal_with_no_code_is_not_a_pass() {
         let addr = serve("", 403).await;
@@ -807,9 +747,7 @@ mod tests {
         assert!(failed > 0, "a bodiless 403 was accepted as proof");
     }
 
-    /// The daemon leaks the secret through a job. The path checks are all
-    /// refusals, so only the data plane can catch it, which is the whole point
-    /// of issue #14.
+    /// The path checks cannot see a leak through a job, so the data plane has to (#14).
     #[tokio::test]
     async fn a_daemon_that_leaks_through_a_job_is_caught() {
         let addr = serve(
@@ -829,8 +767,7 @@ mod tests {
         );
     }
 
-    /// Issue #17. A daemon that issues a scoped token and then ignores the
-    /// scope answers every request the same way it answers the operator.
+    /// A daemon that ignores the scope answers a scoped token as it answers the operator (#17).
     #[tokio::test]
     async fn a_daemon_that_ignores_the_scope_is_caught() {
         let addr = serve(
@@ -886,8 +823,7 @@ mod tests {
         assert!(!text.contains("all 2 checks passed"), "{text}");
     }
 
-    /// Issue #20. With a root, a passing run removes its own probes and
-    /// nothing beside them.
+    /// With a root, a passing run removes its own probes and nothing beside them (#20).
     #[test]
     fn tidy_removes_the_probes_and_only_the_probes() {
         let root = std::env::temp_dir().join(format!("cordon-tidy-{}", std::process::id()));

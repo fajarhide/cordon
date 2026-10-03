@@ -32,26 +32,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # The runner has docker, so the two container tests that skip on a laptop
-      # actually run here. Pulling the image up front keeps the 20s test
-      # timeout from being spent on a pull.
-      # Pulled up front so a cold pull does not eat a job's wall clock budget.
+      # Pulled up front so a cold pull does not eat a test's 20s timeout.
       - name: Pull the sandbox image
         run: docker pull alpine:3.20
 
-      # CORDON_REQUIRE_DOCKER turns a skipped container test into a failure, so
-      # coverage cannot quietly lapse on a runner that has a runtime. It was
-      # reported as being here once before and was not: a scripted edit failed
-      # silently and nobody checked the file.
+      # CORDON_REQUIRE_DOCKER makes a skipped container test a failure, so coverage cannot lapse.
       - name: Test
         run: cargo test -- --nocapture
         env:
           CORDON_REQUIRE_DOCKER: "1"
 
-      # podman is a documented runtime now rather than a hopeful alias, so it
-      # gets its own run. It broke once already: cordon called docker
-      # unconditionally, and the old egress allowlist's host-gateway pin failed
-      # the container outright under rootless podman with netavark.
+      # podman gets its own run: three bugs only ever appeared under rootless podman.
       - name: Install podman and pull the image for it
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq podman
@@ -74,8 +65,7 @@ jobs:
       - name: Build the release binary
         run: cargo build --release
 
-      # cordon passes --pull never, so every image a job uses has to be here
-      # before any daemon starts.
+      # cordon passes --pull never, so the image has to be here before a daemon starts.
       - name: Pull the sandbox image
         run: docker pull -q alpine:3.20
 
@@ -84,8 +74,7 @@ jobs:
           ls -l target/release/cordon | awk '{printf "binary: %.1f MB\n", $5/1048576}'
           cargo tree --depth 1 --edges normal | tail -n +2 | wc -l | xargs echo "direct dependencies:"
 
-      # No daemon, no docker, no configuration. If this fails the product does
-      # not work, so it runs before anything else is set up.
+      # Needs no daemon and no docker, so it runs before anything else is set up.
       - name: cordon demo
         run: ./target/release/cordon demo
 
@@ -100,19 +89,15 @@ jobs:
           done
           curl -sf http://127.0.0.1:7777/v1/health
 
-      # With a token, so the auth checks run rather than skip, and on Linux,
-      # so the data plane checks run rather than skip. Both are the point.
-      # --root, so the probe workspaces are removed, and a check that they
-      # were: a run on every deploy must not grow the root.
+      # With a token and on Linux, so the auth and data plane checks run instead of skipping.
+      # --root removes the probes: a run on every deploy must not grow the root.
       - name: cordon verify
         run: |
           ./target/release/cordon verify http://127.0.0.1:7777 ci-token --root /tmp/cordon-ci
           test ! -e /tmp/cordon-ci/owners/cordon-verify || {
             echo "verify --root left its probe workspaces behind"; exit 1; }
 
-      # A second daemon, configured for the container backend, so the backend
-      # floor check runs instead of skipping. It is the one check the
-      # process-configured daemon above cannot exercise.
+      # A container-configured daemon, the only kind the backend floor check can run against.
       - name: cordon verify against a container-configured daemon
         run: |
           mkdir -p /tmp/cordon-ci-ctr
@@ -128,8 +113,7 @@ jobs:
             echo "the backend floor check did not run on a container-configured daemon"
             exit 1; }
 
-      # A run with no credentials must not report success: every check skips,
-      # nothing passes, and the exit code has to say so.
+      # With no credentials every check skips, and an all-skip run must exit non-zero.
       - name: cordon verify refuses to pass without credentials
         run: |
           if ./target/release/cordon verify http://127.0.0.1:7777 > /tmp/noauth.txt 2>&1; then
@@ -156,8 +140,7 @@ jobs:
           body=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/$token?owner=acme/budi")
           test "$body" = "hello" || { echo "artifact body was $body"; exit 1; }
 
-          # The same token, a different owner. Must be refused, and must look
-          # identical to a token that never existed.
+          # Another owner's fetch must be refused and look like a token that never existed.
           wrong=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/$token?owner=acme/ani")
           fake=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/art_ffffffffffffffffffffffffffffffff?owner=acme/ani")
           bare=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/$token")
@@ -195,8 +178,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun test
         working-directory: clients/typescript
-      # The runner's own Ruby. The client is stdlib only, so there is nothing
-      # to install.
+      # The runner's own Ruby: the client is stdlib only.
       - run: ruby test/cordon_test.rb
         working-directory: clients/ruby
 

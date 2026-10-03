@@ -3,8 +3,7 @@
 require "minitest/autorun"
 require_relative "../lib/cordon"
 
-# The same cases as clients/typescript/src/index.test.ts, so the two clients
-# cannot quietly disagree about what goes on the wire.
+# The same cases as the TypeScript client's tests, so the two cannot disagree on the wire.
 class CordonTest < Minitest::Test
   # A client whose transport records every call and answers with one response.
   def client(status = 200, body = "{}", token: nil)
@@ -55,8 +54,7 @@ class CordonTest < Minitest::Test
     assert_equal "http://x/v1/artifact/art_abc?owner=acme%2Flegal%2Fbudi", @calls[0][:url]
   end
 
-  # The daemon has required the owner since issue #8. A client that made it
-  # optional would put the caller back where that issue started.
+  # The daemon requires the owner, so the client must not make it optional (#8).
   def test_artifact_cannot_be_called_without_an_owner
     assert_raises(ArgumentError) { client.artifact("art_abc") }
   end

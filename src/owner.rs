@@ -1,27 +1,15 @@
 //! Turns a caller supplied identifier into a workspace location.
-//!
-//! A segment is validated, never cleaned. Silently rewriting an identifier is
-//! how two different owners end up sharing one directory, which is the exact
-//! failure this whole program exists to prevent.
+//! Segments are validated, never cleaned: rewriting one lets two owners share a directory.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 const MAX_SEGMENTS: usize = 8;
-/// 64 rather than 128. A UUID is 36 characters and is the single most likely
-/// owner id, so the cap has to clear it comfortably; 128 made eight segments
-/// long enough to overrun PATH_MAX on a deep root, which surfaced as a 500.
-/// Mapping that error to a 4xx is issue #10 and still open.
+/// Fits a UUID (36). At 128, eight segments overran PATH_MAX on a deep root (#10).
 const MAX_SEGMENT_LEN: usize = 64;
 
-/// An owner's own files live in this leaf, never in the directory that holds its
-/// child owners.
-///
-/// Without it the ownership tree and the directory tree are the same object, so
-/// `owners/acme` physically contains `owners/acme/legal/budi` and an ancestor
-/// reaches every descendant. A segment can never be spelled `.workspace`,
-/// because `validate` refuses a leading dot, so this leaf cannot collide with a
-/// child owner's name.
+/// An owner's files live in this leaf, so its directory never contains a child owner's files.
+/// `validate` refuses a leading dot, so the leaf cannot collide with a child owner's name.
 pub const WORKSPACE_LEAF: &str = ".workspace";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +41,7 @@ impl Owner {
         self.node(root).join(WORKSPACE_LEAF)
     }
 
-    /// The node in the ownership tree, which holds this owner's workspace leaf
-    /// and the nodes of its children. Nothing may be resolved against it.
+    /// Holds the workspace leaf and the child nodes. Nothing may be resolved against it.
     fn node(&self, root: &Path) -> PathBuf {
         let mut p = root.join("owners");
         for s in &self.segments {
@@ -63,15 +50,12 @@ impl Owner {
         p
     }
 
-    /// Whether this owner is `prefix` or sits under it. Compared a segment at
-    /// a time: `acme2` is not inside `acme`, which is what comparing the
-    /// joined strings would say.
+    /// Compared by segment: `acme2` is not inside `acme`, which a string prefix would claim.
     pub fn within(&self, prefix: &Owner) -> bool {
         self.segments.starts_with(&prefix.segments)
     }
 
-    /// Nearest ancestor first, so a caller can take the most specific match
-    /// without sorting.
+    /// Nearest ancestor first, so a caller can take the most specific match without sorting.
     pub fn ancestors(&self) -> Vec<Owner> {
         (1..self.segments.len())
             .rev()
@@ -88,22 +72,8 @@ impl fmt::Display for Owner {
     }
 }
 
-/// An allowlist, not a blocklist. A blocklist of dangerous characters is a list
-/// someone eventually finds a gap in; an allowlist of the characters real
-/// identifiers use has no gap to find.
-///
-/// Lowercase ASCII only, on purpose. A tenant id, a user id or a team slug is
-/// machine generated and ASCII in every system this integrates with.
-///
-/// Unicode is refused because deciding what `cafe\u{0301}` and `caf\u{00e9}`
-/// mean is not the daemon's call: one spelling becomes two workspaces on Linux
-/// and one on macOS.
-///
-/// Uppercase is refused for exactly the same reason, which the first version of
-/// this comment reasoned about and then failed to apply. APFS, SMB and NFS are
-/// case insensitive, so `BUDI` and `budi` would be two owners sharing one
-/// directory there and two separate ones on ext4. A caller holding a mixed case
-/// identifier lowercases it before passing it, which is its decision to make.
+/// An allowlist: a blocklist of dangerous characters is a list someone finds a gap in.
+/// Lowercase ASCII only: APFS, SMB and NFS fold case and Unicode forms that ext4 keeps apart.
 fn validate(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("owner segment is empty".into());
@@ -188,8 +158,7 @@ mod tests {
         owner(&["acme", &"a".repeat(64)]).expect("64 is the cap, not over it");
     }
 
-    /// Issue #4. On a case insensitive filesystem an uppercase spelling would be
-    /// a second owner sharing the first one's directory.
+    /// A case insensitive filesystem would give `BUDI` and `budi` one directory (#4).
     #[test]
     fn refuses_uppercase_so_two_spellings_cannot_share_a_directory() {
         for s in ["ACME", "Budi", "budI", "acme-Corp"] {
@@ -198,8 +167,7 @@ mod tests {
         owner(&["acme", "budi"]).expect("the lowercase spelling stays valid");
     }
 
-    /// Issue #2. An owner's own files sit in a leaf that cannot contain a child
-    /// owner's leaf, so no containment check can ever walk from one to the other.
+    /// An owner's leaf cannot contain a child owner's leaf (#2).
     #[test]
     fn an_owners_files_never_contain_a_child_owners_files() {
         let parent = owner(&["acme"]).unwrap();
@@ -221,11 +189,7 @@ mod tests {
         assert!(owner(&["a"; 9]).is_err(), "9 segments was accepted");
     }
 
-    /// Review Focus 1. Two spellings of one word must never become two
-    /// workspaces, and must never collapse into one on a filesystem that
-    /// normalises for us. Refusing every non-ASCII byte removes the
-    /// equivalence class rather than picking a winner inside it, and takes
-    /// homoglyph confusion with it.
+    /// Refusing all non-ASCII removes normalisation and homoglyph collisions outright.
     #[test]
     fn refuses_every_non_ascii_spelling() {
         let cases: &[(&str, &str)] = &[

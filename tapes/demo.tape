@@ -1,5 +1,4 @@
-# The hero asset: two owners, nine escape attempts, nine refusals.
-# Real output from the real binary. Nothing here is typed by hand.
+# Real output from the real binary: two owners, nine escape attempts.
 Output assets/demo.gif
 
 Set Shell bash

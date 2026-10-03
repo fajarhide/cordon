@@ -9,9 +9,8 @@ After=network.target
 User=cordon
 Group=cordon
 
-# The container backend needs this user in the docker group. Be aware that
-# membership of the docker group is equivalent to root on the host, so a
-# deployment that only uses the process backend should leave it out.
+# The container backend needs the docker group, which is root on the host.
+# Leave it out when only the process backend is used.
 #SupplementaryGroups=docker
 
 ExecStart=/usr/local/bin/cordon serve

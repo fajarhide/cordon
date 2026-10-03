@@ -1,34 +1,10 @@
-//! The filesystem boundary for the process backend.
-//!
-//! Issue #1: there was none. `/v1/run` resolved its `collect` patterns through
-//! the guard and then handed the job a process whose only restriction was its
-//! working directory, so `cat ../other-owner/secret.md` worked and the whole
-//! guarantee was prose.
-//!
-//! The boundary is Landlock, a Linux LSM an unprivileged process uses to
-//! restrict its own filesystem access, inherited across `exec`. No root, no
-//! namespaces, no container, which is what lets the process backend keep
-//! running on a 1 GB VPS and still mean something.
-//!
-//! The split matters. A ruleset is built in the parent, where allocating is
-//! safe, and becomes a file descriptor. The child then needs one syscall on
-//! that descriptor, which is all `pre_exec` is allowed to do: allocating after
-//! `fork` in a process that has threads can deadlock on the allocator's lock,
-//! and a tokio daemon always has threads.
-//!
-//! Three raw syscalls rather than a crate, because the crate's API wants to
-//! build and apply in one place and that is exactly the thing that cannot
-//! happen here.
+//! The process backend's filesystem boundary: Landlock, which needs no root or namespaces (#1).
+//! The ruleset is built in the parent: allocating after fork in a threaded process can deadlock.
 
 use std::path::{Path, PathBuf};
 
-/// Read and execute are granted on these so the job can start at all: without
-/// them `exec` of `/bin/sh` is denied and every job dies before it runs.
-///
-/// Notably absent: `/tmp` and `/var`. `CORDON_ROOT` usually lives under one of
-/// them, and granting either would hand the job every other owner's sandbox
-/// through the same hole this module exists to close. The job's `TMPDIR` points
-/// at its own workspace instead.
+/// Read and execute only, without which no job could exec `/bin/sh`.
+/// No `/tmp` or `/var`: `CORDON_ROOT` usually lives there, so either would expose every sandbox.
 const DEFAULT_SYSTEM_PATHS: &[&str] = &[
     "/usr",
     "/bin",
@@ -56,7 +32,7 @@ pub enum Prepared {
 }
 
 impl Prepared {
-    /// Builds the boundary for one workspace. Called in the parent.
+    /// Called in the parent, where allocating is safe.
     pub fn build(workspace: &Path, system: &[PathBuf]) -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -83,7 +59,6 @@ impl Prepared {
         }
     }
 
-    /// The raw descriptor to apply in the child, if there is one.
     pub fn raw_fd(&self) -> Option<i32> {
         match self {
             #[cfg(target_os = "linux")]
@@ -93,9 +68,8 @@ impl Prepared {
     }
 }
 
-/// Three raw syscalls and two file descriptors. The crate root denies unsafe,
-/// and this module plus the one `pre_exec` block in `exec/process.rs` are the
-/// only places it is allowed.
+/// Raw syscalls, not the landlock crate: its API builds and applies in one place, and the
+/// child side here must be a bare syscall on a descriptor the parent built.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod linux {
@@ -111,11 +85,8 @@ pub mod linux {
     const CREATE_RULESET_VERSION: u32 = 1;
     const RULE_PATH_BENEATH: libc::c_int = 1;
 
-    /// ABI v1 is bits 0 through 12: execute, write, read, readdir, the remove
-    /// pair and the seven make operations. Later ABIs add refer and truncate;
-    /// nothing here needs them, and asking for them on an older kernel would
-    /// make the ruleset only partially enforceable, which this code treats as
-    /// a failure.
+    /// ABI v1 only, bits 0 through 12. Later bits (refer, truncate) are not needed, and an
+    /// older kernel could only partially enforce them.
     const ACCESS_FS_ALL_V1: u64 = 0x1fff;
     /// Execute, read a file, read a directory.
     const ACCESS_FS_READ: u64 = 0b1101;
@@ -125,24 +96,21 @@ pub mod linux {
         handled_access_fs: u64,
     }
 
-    // Packed, as the kernel defines it. A padded version silently misreads the
-    // fd and the rule lands on the wrong directory or fails.
+    // Packed, as the kernel defines it. A padded layout silently misreads the fd.
     #[repr(C, packed)]
     struct PathBeneathAttr {
         allowed_access: u64,
         parent_fd: i32,
     }
 
-    /// An owned ruleset descriptor. Closed on drop, so a failed spawn does not
-    /// leak one per job.
+    /// Closed on drop, so a failed spawn does not leak a descriptor per job.
     pub struct Ruleset {
         pub fd: i32,
     }
 
     impl Drop for Ruleset {
         fn drop(&mut self) {
-            // SAFETY: fd came from a successful landlock_create_ruleset and is
-            // closed exactly once.
+            // SAFETY: fd came from landlock_create_ruleset and is closed exactly once.
             unsafe { libc::close(self.fd) };
         }
     }
@@ -177,8 +145,7 @@ pub mod linux {
             set.allow(workspace, ACCESS_FS_ALL_V1)
                 .map_err(|e| format!("the workspace rule failed: {e}"))?;
             for p in system {
-                // A path that is not on this machine is skipped rather than
-                // fatal: /lib64 is absent on plenty of distributions.
+                // A missing path is skipped, not fatal: /lib64 is absent on many distributions.
                 let _ = set.allow(p, ACCESS_FS_READ);
             }
             Ok(set)
@@ -225,8 +192,7 @@ pub mod linux {
     }
 
     fn abi_version() -> Result<i64, String> {
-        // SAFETY: the version query takes a null attr and a zero size by
-        // contract.
+        // SAFETY: the version query takes a null attr and a zero size by contract.
         let v = unsafe {
             libc::syscall(
                 SYS_CREATE_RULESET,
@@ -250,11 +216,7 @@ pub mod linux {
         Ok(v)
     }
 
-    /// Applies a prepared ruleset to the calling process.
-    ///
-    /// Called from `pre_exec`, so it does nothing but two syscalls: no
-    /// allocation, no locks, nothing that can deadlock after a fork.
-    ///
+    /// Called from `pre_exec`, so two syscalls only: no allocation or locks after fork.
     /// # Safety
     /// `fd` must be a live landlock ruleset descriptor.
     pub unsafe fn apply(fd: i32) -> Result<(), std::io::Error> {
@@ -275,9 +237,7 @@ mod tests {
 
     #[test]
     fn the_default_system_paths_never_include_a_root_a_sandbox_could_live_under() {
-        // Under the same lock as the override test below. Without it this read
-        // the environment while that test had CORDON_SYSTEM_PATHS set, and
-        // failed about one run in six.
+        // Shares the lock with the override test, which sets CORDON_SYSTEM_PATHS.
         temp_env(&[], || {
             let paths = system_paths();
             for bad in ["/tmp", "/var", "/home", "/", "/root"] {
@@ -305,16 +265,14 @@ mod tests {
         });
     }
 
-    /// On Linux a boundary must be buildable; anywhere else the absence has to
-    /// be reported rather than silently treated as success.
+    /// Off Linux the absence must be reported, not silently treated as success.
     #[test]
     fn build_either_succeeds_or_explains_itself() {
         let tmp = std::env::temp_dir().join(format!("cordon-sb-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let p = Prepared::build(&tmp, &system_paths());
         if cfg!(target_os = "linux") {
-            // A kernel without landlock is a legitimate answer, but it has to
-            // come with a reason a human can act on.
+            // A kernel without landlock is a legitimate answer, but it needs an actionable reason.
             if let Some(why) = p.why_unavailable() {
                 assert!(why.contains("landlock"), "unhelpful reason: {why}");
             } else {

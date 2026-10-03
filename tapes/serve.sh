@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Starts a daemon for a recording. Container backend on podman, token set, so
-# the auth checks and the data plane checks both run rather than skip.
+# Daemon for a recording: container backend and a token, so no check skips.
 set -euo pipefail
 ROOT="$HOME/.cordon-rec"
 rm -rf "$ROOT"; mkdir -p "$ROOT"

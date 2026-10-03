@@ -1,13 +1,7 @@
-//! One unsafe block lives here, and nowhere else in the crate.
 #![allow(unsafe_code)]
 
-//! The default backend. One process, cwd pinned to the workspace, a scrubbed
-//! environment, its own session so a timeout takes the children too, and
-//! rlimits applied between fork and exec.
-//!
-//! What it does not give you: a network namespace, a read only root, or a
-//! separate pid namespace. It is the backend for a 1 GB VPS running code you
-//! wrote. Code you did not write belongs in the container backend.
+//! The default backend: one process in its own session, scrubbed environment, rlimits, Landlock.
+//! No network or pid namespace and no read only root: untrusted code belongs in the container.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -18,11 +12,7 @@ use tokio::process::Command;
 use super::{read_capped, ExecError, Job, Network, Outcome};
 
 pub async fn run(job: Job) -> Result<Outcome, ExecError> {
-    // This backend shares the host network namespace. It can therefore give a
-    // job open access, which is what it always gave, and it cannot give a job
-    // no access at all. Saying so is the honest inversion of the old code,
-    // which refused an "egress allowlist" while handing out the whole host
-    // network by default (issues #1 and #11).
+    // Shares the host network namespace, so it can give open access and never none (#1, #11).
     let network = match &job.network {
         None => Network::Open { pins: Vec::new() },
         Some(Network::Open { pins }) if pins.is_empty() => Network::Open { pins: Vec::new() },
@@ -39,9 +29,7 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
         }
     };
 
-    // Issue #1: this used to be the whole of the isolation, a working
-    // directory and nothing else. The boundary is built here, in the parent
-    // where allocating is safe, and applied in the child with one syscall.
+    // Built in the parent, where allocating is safe; the child applies it with syscalls only (#1).
     let boundary = crate::sandbox::Prepared::build(&job.workspace, &crate::sandbox::system_paths());
     if let Some(why) = boundary.why_unavailable() {
         if !job.unsafe_process {
@@ -70,8 +58,7 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
     let mut child = cmd
         .spawn()
         .map_err(|e| ExecError::Spawn(format!("spawn {}: {e}", job.entrypoint)))?;
-    // The ruleset descriptor is only needed until the child has exec'd, which
-    // spawn has already waited for.
+    // The child has exec'd by the time spawn returns, so the ruleset descriptor can go.
     drop(boundary);
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -103,8 +90,7 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
             duration_ms: started.elapsed().as_millis(),
             network: network.clone(),
         }),
-        // 124 is what timeout(1) uses, so an operator reading a log already
-        // knows what it means.
+        // 124 is what timeout(1) uses.
         Err(_) => Ok(Outcome {
             exit_code: 124,
             stdout: String::new(),
@@ -116,21 +102,15 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
     }
 }
 
-/// Applies rlimits in the child between fork and exec.
-///
-/// `pre_exec` runs in a forked process where only async-signal-safe calls are
-/// legal, which is why the closure does nothing but `setsid` and `setrlimit`.
-/// This is the one unsafe block in the crate.
+/// `pre_exec` runs after fork, where only async-signal-safe calls are legal: no allocation.
 fn apply_limits(cmd: &mut Command, job: &Job, boundary_fd: Option<i32>) {
     let memory_bytes = job.limits.memory_mb.saturating_mul(1024 * 1024);
     unsafe {
         cmd.pre_exec(move || {
-            // Its own session, so a timeout can take the whole tree and not
-            // just the shell that spawned it.
+            // Own session, so a timeout kills the whole tree and not just the shell.
             libc::setsid();
 
-            // The filesystem boundary. Two syscalls on a descriptor the parent
-            // already built, which is all this context can safely do.
+            // Syscalls only, on a descriptor the parent already built.
             #[cfg(target_os = "linux")]
             if let Some(fd) = boundary_fd {
                 crate::sandbox::linux::apply(fd)?;
@@ -142,10 +122,7 @@ fn apply_limits(cmd: &mut Command, job: &Job, boundary_fd: Option<i32>) {
             set(libc::RLIMIT_FSIZE, 1024 * 1024 * 1024);
             set(libc::RLIMIT_NOFILE, 256);
             set(libc::RLIMIT_CORE, 0);
-            // RLIMIT_AS is the portable address space cap. On Linux it is the
-            // effective memory limit for this backend; on macOS it is
-            // advisory, which is one more reason untrusted code belongs in the
-            // container backend.
+            // RLIMIT_AS is the effective memory cap on Linux and only advisory on macOS.
             if memory_bytes > 0 {
                 set(libc::RLIMIT_AS, memory_bytes);
             }
@@ -154,17 +131,13 @@ fn apply_limits(cmd: &mut Command, job: &Job, boundary_fd: Option<i32>) {
     }
 }
 
-/// The rlimit resource constants are `c_int` on macOS and the BSDs and
-/// `__rlimit_resource_t`, a u32, on glibc. The signature follows the platform
-/// rather than picking one and casting, so the call sites below stay plain.
+/// Rlimit constants are `c_int` on macOS and the BSDs, `__rlimit_resource_t` (u32) on glibc.
 #[cfg(target_env = "gnu")]
 type Resource = libc::__rlimit_resource_t;
 #[cfg(not(target_env = "gnu"))]
 type Resource = libc::c_int;
 
-/// RLIMIT_CPU is fixed at 60s rather than derived from wall_ms: a job can be
-/// slow on IO without burning CPU, and killing it for that would be wrong. The
-/// wall clock is the limit the request controls.
+/// RLIMIT_CPU is fixed at 60s, not derived from wall_ms: a job slow on IO burns no CPU.
 unsafe fn set(resource: Resource, value: u64) {
     let rl = libc::rlimit {
         rlim_cur: value as libc::rlim_t,
@@ -198,9 +171,7 @@ mod tests {
                 stdout_kb: 64,
             },
             network: None,
-            // Linux gets a real boundary from landlock, so CI enforces it.
-            // Everywhere else there is nothing to enforce, so the suite runs
-            // without one and the boundary itself is tested only on Linux.
+            // Landlock gives Linux a real boundary; elsewhere the suite runs without one.
             unsafe_process: cfg!(not(target_os = "linux")),
         }
     }
@@ -256,10 +227,7 @@ mod tests {
         assert!(out.stdout.len() <= 2048, "kept {} bytes", out.stdout.len());
     }
 
-    /// This backend shares the host network namespace, so it can offer open
-    /// access and cannot offer none. A caller that explicitly asks for no
-    /// network is refused rather than quietly handed the whole host network,
-    /// which is what used to happen.
+    /// An explicit request for no network is refused, not quietly given the host network.
     #[tokio::test]
     async fn asking_for_no_network_is_refused_rather_than_ignored() {
         let mut j = job(tmp("nonet"), "true");
@@ -268,8 +236,6 @@ mod tests {
         assert!(matches!(err, ExecError::Unsupported(_)), "got {err:?}");
     }
 
-    /// And the response says what the job actually got, so a caller never has
-    /// to guess.
     #[tokio::test]
     async fn the_outcome_reports_the_network_the_job_really_had() {
         let out = Backend::Process
@@ -279,8 +245,6 @@ mod tests {
         assert_eq!(out.network.label(), "open");
     }
 
-    /// Review Focus 3. Two jobs for one owner must not interleave into a
-    /// corrupt file.
     #[tokio::test]
     async fn concurrent_jobs_in_one_workspace_do_not_corrupt_a_shared_file() {
         let ws = tmp("concurrent");
@@ -304,8 +268,7 @@ mod tests {
         );
     }
 
-    /// Issue #1. With no boundary available the backend refuses rather than
-    /// running the job anyway, which is what it used to do on every platform.
+    /// With no boundary available the backend refuses rather than running the job (#1).
     #[tokio::test]
     async fn no_boundary_and_no_override_means_the_job_does_not_run() {
         let mut j = job(tmp("noboundary"), "echo hello");
@@ -313,8 +276,7 @@ mod tests {
 
         let result = Backend::Process.run(j).await;
 
-        // On Linux the boundary is real, so the job runs. A kernel without
-        // landlock lands in the refusal arm, which is also correct.
+        // A kernel without landlock lands in the refusal arm, which is also correct.
         #[cfg(target_os = "linux")]
         match result {
             Ok(out) => assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr),
@@ -324,8 +286,7 @@ mod tests {
             Err(e) => panic!("wrong error: {e:?}"),
         }
 
-        // Anywhere else there is no boundary to have, so running the job at
-        // all would be the bug.
+        // No boundary exists here, so running the job at all would be the bug.
         #[cfg(not(target_os = "linux"))]
         match result {
             Err(ExecError::Unsupported(m)) => {
@@ -336,10 +297,7 @@ mod tests {
         }
     }
 
-    /// Issue #1, the actual claim. A job must not read another owner's file.
-    ///
-    /// Linux only, because landlock is the thing being tested and there is
-    /// nothing to test anywhere else. CI runs on Linux for exactly this.
+    /// Linux only: landlock is the thing under test (#1).
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_job_cannot_read_another_owners_file() {
@@ -352,12 +310,8 @@ mod tests {
         std::fs::create_dir_all(ani.dir(&root)).unwrap();
         std::fs::write(ani.dir(&root).join("secret.md"), b"ANI-SECRET").unwrap();
 
-        // Every shape the review used, run from inside the job rather than
-        // through the guard, because the guard is not what was broken.
-        //
-        // The find output is fenced by markers. An earlier version of this test
-        // just grepped stdout for the filename and failed on cat's own error
-        // text, which mentions the path it was denied.
+        // Run from inside the job, not through the guard. The find output is fenced by markers
+        // because cat's own error text mentions the path it was denied.
         let script = "\
             cat ../../ani/.workspace/secret.md 2>&1;
             cat ../../../owners/acme/ani/.workspace/secret.md 2>&1;

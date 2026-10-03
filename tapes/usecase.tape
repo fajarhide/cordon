@@ -1,5 +1,4 @@
-# One story in five beats: an agent writes a report for Budi, Budi gets it,
-# Ani cannot, and neither can Ani's job.
+# An agent writes a report for Budi. Budi gets it; Ani and Ani's job do not.
 Output assets/usecase.gif
 
 Set Shell bash

@@ -1,6 +1,4 @@
-//! Execution backends. Two of them, both known at compile time, so this is an
-//! enum and not a trait object. A `Box<dyn Backend>` would mean an
-//! `async-trait` dependency to solve a problem two enum variants do not have.
+//! Execution backends. An enum, not a trait object, so two variants need no `async-trait`.
 
 pub mod container;
 pub mod process;
@@ -15,19 +13,13 @@ pub struct Limits {
     pub stdout_kb: usize,
 }
 
-/// What a job can reach on the network.
-///
-/// Two values, because v1 has two to offer. There is no packet filter anywhere
-/// in it, so anything that is not `None` is the host's full outbound access,
-/// and `Open` is named that way so it cannot be read as something narrower
-/// (issue #11).
+/// No packet filter exists, so anything but `None` is the host's full outbound access (#11).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Network {
     #[default]
     None,
     Open {
-        /// Name to address pins, a convenience for reaching an internal
-        /// service by name. Not a restriction.
+        /// Name to address pins: a convenience, not a restriction.
         pins: Vec<container::hosts::Pin>,
     },
 }
@@ -48,11 +40,9 @@ pub struct Job {
     pub args: Vec<String>,
     pub stdin: String,
     pub limits: Limits,
-    /// None means the caller did not ask, so each backend uses what it can
-    /// actually provide and the response says which.
+    /// None means the caller did not ask: the backend uses what it can provide and reports it.
     pub network: Option<Network>,
-    /// Only consulted by the process backend, and only to decide whether a
-    /// missing filesystem boundary is fatal.
+    /// Process backend only: decides whether a missing filesystem boundary is fatal.
     pub unsafe_process: bool,
 }
 
@@ -71,9 +61,7 @@ pub struct Outcome {
 pub enum ExecError {
     /// The backend cannot honour something the request asked for.
     Unsupported(String),
-    /// The backend itself is not there. Never fall back to a weaker backend on
-    /// this: the caller asked for container isolation and has to be told it is
-    /// unavailable, not quietly handed less.
+    /// The backend is missing. Never fall back to a weaker one: the caller must be told.
     BackendUnavailable(String),
     Spawn(String),
 }
@@ -102,9 +90,7 @@ impl Backend {
     }
 }
 
-/// Reads a child's output up to a cap, telling the caller whether it had more
-/// to say. Both backends share it, so neither can accidentally buffer a job's
-/// entire output into the daemon's heap.
+/// Shared by both backends so neither buffers a job's whole output into the daemon's heap.
 pub(crate) async fn read_capped<R>(mut r: R, cap: usize) -> (String, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
