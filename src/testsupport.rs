@@ -89,10 +89,21 @@ pub async fn post_auth(
     payload: &str,
     auth: Option<&str>,
 ) -> (StatusCode, Value) {
-    let mut b = Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json");
+    post_typed(f, uri, payload, auth, Some("application/json")).await
+}
+
+/// The same, with explicit control of the content type, including none at all.
+pub async fn post_typed(
+    f: &Fixture,
+    uri: &str,
+    payload: &str,
+    auth: Option<&str>,
+    content_type: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder().method("POST").uri(uri);
+    if let Some(ct) = content_type {
+        b = b.header("content-type", ct);
+    }
     if let Some(a) = auth {
         b = b.header("authorization", a);
     }

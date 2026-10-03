@@ -7,6 +7,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+
+use crate::http::ApiJson;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -49,7 +51,7 @@ pub struct RunRequest {
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
-    Json(req): Json<RunRequest>,
+    ApiJson(req): ApiJson<RunRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let owner = owner_or_error(&req.owner)?;
     let limits = clamp_limits(&cfg, req.limits)?;

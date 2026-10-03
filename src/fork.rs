@@ -11,6 +11,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+
+use crate::http::ApiJson;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -26,7 +28,7 @@ pub struct ForkRequest {
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
-    Json(req): Json<ForkRequest>,
+    ApiJson(req): ApiJson<ForkRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let from = owner_or_error(&req.from)?;
     let to = owner_or_error(&req.to)?;

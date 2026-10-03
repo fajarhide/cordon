@@ -7,6 +7,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+
+use crate::http::ApiJson;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -25,7 +27,7 @@ pub struct ResolveRequest {
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
-    Json(req): Json<ResolveRequest>,
+    ApiJson(req): ApiJson<ResolveRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let owner = owner_or_error(&req.owner)?;
     let resolved = Guard::new(&cfg.root, &owner, req.inherit)

@@ -25,6 +25,8 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::style::Style;
+
 pub enum Outcome {
     Pass,
     Fail,
@@ -389,28 +391,34 @@ async fn zero_memory_check(c: &Client) -> Result<Check, String> {
     Ok(Check::refused(DATA_PLANE_NAMES[5], status, &raw))
 }
 
-pub fn report(checks: &[Check], w: &mut impl Write) -> bool {
+pub fn report(checks: &[Check], w: &mut impl Write, s: Style) -> bool {
     let mut failed = 0usize;
     let mut skipped = 0usize;
     for c in checks {
         match &c.outcome {
             Outcome::Pass => {
-                let _ = writeln!(w, "ok   {:<32} {}", c.name, c.detail);
+                let _ = writeln!(w, "{}   {:<32} {}", s.green("ok"), c.name, s.dim(&c.detail));
             }
             Outcome::Fail => {
                 failed += 1;
-                let _ = writeln!(w, "FAIL {:<32} {}", c.name, c.detail);
+                let _ = writeln!(w, "{} {:<32} {}", s.red("FAIL"), c.name, c.detail);
             }
             Outcome::Skip(why) => {
                 skipped += 1;
-                let _ = writeln!(w, "skip {:<32} {why}", c.name);
+                let _ = writeln!(w, "{} {:<32} {}", s.yellow("skip"), c.name, s.dim(why));
             }
         }
     }
     let passed = checks.len() - failed - skipped;
     let _ = writeln!(w);
     if failed > 0 {
-        let _ = writeln!(w, "{failed} failed, {passed} passed, {skipped} skipped");
+        let _ = writeln!(
+            w,
+            "{}",
+            s.red(&format!(
+                "{failed} failed, {passed} passed, {skipped} skipped"
+            ))
+        );
         return false;
     }
     // Nothing failed and nothing passed either. A pipeline reading exit 0 as
@@ -419,7 +427,10 @@ pub fn report(checks: &[Check], w: &mut impl Write) -> bool {
     if passed == 0 {
         let _ = writeln!(
             w,
-            "{passed} passed, {skipped} skipped. Nothing was actually tested, so this is not a pass."
+            "{}",
+            s.red(&format!(
+                "{passed} passed, {skipped} skipped. Nothing was actually tested, so this is not a pass."
+            ))
         );
         return false;
     }
@@ -428,14 +439,19 @@ pub fn report(checks: &[Check], w: &mut impl Write) -> bool {
         // this output as a clean bill of health is how #14 happened.
         let _ = writeln!(
             w,
-            "{passed} passed, {skipped} skipped. A skip is not a pass: those properties were not tested here."
+            "{} {}",
+            s.green(&format!("{passed} passed")),
+            s.yellow(&format!(
+                "{skipped} skipped. A skip is not a pass: those properties were not tested here."
+            ))
         );
     } else {
-        let _ = writeln!(w, "all {passed} checks passed");
+        let _ = writeln!(w, "{}", s.green(&format!("all {passed} checks passed")));
     }
     let _ = writeln!(
         w,
-        "\nWorkspaces under the owner prefix cordon-verify are left behind; there is no endpoint that deletes an owner."
+        "\n{}",
+        s.dim("Workspaces under the owner prefix cordon-verify are left behind; there is no endpoint that deletes an owner.")
     );
     true
 }
@@ -649,7 +665,7 @@ mod tests {
     fn a_run_that_tested_nothing_is_not_a_success() {
         let checks = vec![Check::skip("a", "no token"), Check::skip("b", "no token")];
         let mut out = Vec::new();
-        let ok = report(&checks, &mut out);
+        let ok = report(&checks, &mut out, Style::plain());
         let text = String::from_utf8(out).unwrap();
         assert!(!ok, "an all-skip run exited successfully");
         assert!(text.contains("Nothing was actually tested"), "{text}");
@@ -659,7 +675,7 @@ mod tests {
     fn the_report_never_counts_a_skip_as_a_pass() {
         let checks = vec![Check::pass("a", "fine"), Check::skip("b", "no docker")];
         let mut out = Vec::new();
-        let ok = report(&checks, &mut out);
+        let ok = report(&checks, &mut out, Style::plain());
         let text = String::from_utf8(out).unwrap();
         assert!(ok, "a skip should not fail the run");
         assert!(text.contains("skip"), "{text}");
@@ -671,7 +687,7 @@ mod tests {
     fn the_report_says_fail_loudly_and_returns_false() {
         let checks = vec![Check::pass("a", "fine"), Check::fail("b", "status 200")];
         let mut out = Vec::new();
-        let ok = report(&checks, &mut out);
+        let ok = report(&checks, &mut out, Style::plain());
         let text = String::from_utf8(out).unwrap();
         assert!(!ok);
         assert!(text.contains("FAIL"), "{text}");
