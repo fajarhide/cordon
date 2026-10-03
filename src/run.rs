@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::exec::{Backend, ExecError, Job, Limits};
+use crate::exec::{Backend, ExecError, Job, Limits, Network};
 use crate::guard::Guard;
 use crate::http::ApiError;
 use crate::owner::Owner;
@@ -31,8 +31,18 @@ pub struct RunRequest {
     pub collect: Vec<String>,
     #[serde(default)]
     pub limits: Option<Limits>,
+    /// "none" or "open". Absent means each backend uses what it can actually
+    /// provide, and the response says which.
     #[serde(default)]
-    pub egress: Vec<String>,
+    pub network: Option<String>,
+    /// Name to address pins, only with "open". A convenience for naming an
+    /// internal service, never a restriction (issue #11).
+    #[serde(default)]
+    pub hosts: std::collections::BTreeMap<String, String>,
+    /// Refused on sight. It used to name an allowlist that did not restrict
+    /// anything, so accepting it quietly would carry the old promise forward.
+    #[serde(default)]
+    pub egress: Option<serde_json::Value>,
     #[serde(default)]
     pub backend: Option<String>,
 }
@@ -44,6 +54,7 @@ pub async fn handler(
     let owner = owner_or_error(&req.owner)?;
     let limits = clamp_limits(&cfg, req.limits)?;
     let backend = pick_backend(&cfg, req.backend.as_deref())?;
+    let network = parse_network(&req)?;
 
     // The workspace is created first. The guard resolves a path against the
     // real filesystem, so checking a pattern before the workspace exists
@@ -66,7 +77,7 @@ pub async fn handler(
             args: req.args,
             stdin: req.stdin,
             limits,
-            egress: req.egress,
+            network,
             unsafe_process: cfg.unsafe_process_backend,
         })
         .await
@@ -80,6 +91,7 @@ pub async fn handler(
         "stderr": outcome.stderr,
         "truncated": outcome.truncated,
         "duration_ms": outcome.duration_ms,
+        "network": outcome.network.label(),
         "artifacts": artifacts,
     })))
 }
@@ -141,6 +153,40 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
     })
 }
 
+/// Reads the network the request asked for.
+///
+/// `egress` is refused rather than translated. It named an allowlist that
+/// blocked name resolution and left every address reachable, so accepting it
+/// quietly would carry that promise into the new shape (issue #11).
+fn parse_network(req: &RunRequest) -> Result<Option<Network>, ApiError> {
+    if req.egress.is_some() {
+        return Err(ApiError::bad_request(
+            "egress_removed",
+            "egress was never a boundary: it blocked name resolution and left every address reachable. Use network none or open, with hosts for name pins",
+        ));
+    }
+    let pins = crate::exec::container::hosts::parse(req.hosts.iter())
+        .map_err(|e| ApiError::bad_request("invalid_request", e))?;
+
+    match req.network.as_deref() {
+        None if pins.is_empty() => Ok(None),
+        None => Err(ApiError::bad_request(
+            "invalid_request",
+            "hosts needs network open; pins mean nothing without a network",
+        )),
+        Some("none") if !pins.is_empty() => Err(ApiError::bad_request(
+            "invalid_request",
+            "hosts cannot be used with network none",
+        )),
+        Some("none") => Ok(Some(Network::None)),
+        Some("open") => Ok(Some(Network::Open { pins })),
+        Some(other) => Err(ApiError::bad_request(
+            "invalid_request",
+            format!("network {other:?} is not none or open"),
+        )),
+    }
+}
+
 /// The operator's backend is a floor, not a default.
 ///
 /// Issue #1b: this was `asked.unwrap_or(&cfg.backend)`, so a deployment
@@ -150,6 +196,7 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
 fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> {
     let container = Backend::Container {
         image: cfg.image.clone(),
+        cli: cfg.container_cli.clone(),
     };
     match (cfg.backend.as_str(), asked) {
         (_, Some("container")) => Ok(container),
@@ -454,12 +501,84 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
+    /// Issue #11. The old field is refused rather than translated, so a caller
+    /// still sending it learns the promise changed instead of inheriting it.
     #[tokio::test]
-    async fn an_egress_allowlist_on_the_process_backend_is_a_400() {
-        let f = fixture("run-egress");
-        let payload = r#"{"owner":["acme","budi"],"entrypoint":"true","egress":["example.com:443"],
-            "limits":{"wall_ms":1000,"memory_mb":64,"stdout_kb":8}}"#;
+    async fn the_old_egress_field_is_refused_on_sight() {
+        let f = fixture("run-egress-gone");
+        for payload in [
+            r#"{"owner":["acme","budi"],"entrypoint":"true","egress":["example.com:443"]}"#,
+            r#"{"owner":["acme","budi"],"entrypoint":"true","egress":[]}"#,
+        ] {
+            let (status, body) = post(&f, "/v1/run", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}: {body}");
+            assert_eq!(body["error"]["code"], "egress_removed", "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_network_field_takes_only_none_or_open() {
+        let f = fixture("run-network-values");
+        for bad in ["bridge", "host", "allowlist", ""] {
+            let payload =
+                format!(r#"{{"owner":["acme","budi"],"entrypoint":"true","network":"{bad}"}}"#);
+            let (status, body) = post(&f, "/v1/run", &payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body}");
+        }
+    }
+
+    /// Pins without a network mean nothing, and pins with no network at all are
+    /// a contradiction. Both are refused rather than silently dropped.
+    #[tokio::test]
+    async fn host_pins_need_an_open_network() {
+        let f = fixture("run-pins");
+        for payload in [
+            r#"{"owner":["acme","budi"],"entrypoint":"true","hosts":{"db.internal":"10.0.0.5"}}"#,
+            r#"{"owner":["acme","budi"],"entrypoint":"true","network":"none","hosts":{"db.internal":"10.0.0.5"}}"#,
+        ] {
+            let (status, body) = post(&f, "/v1/run", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_pin_needs_an_address_not_a_magic_name() {
+        let f = fixture("run-pin-addr");
+        let payload = r#"{"owner":["acme","budi"],"entrypoint":"true","network":"open",
+            "hosts":{"db.internal":"host-gateway"}}"#;
         let (status, body) = post(&f, "/v1/run", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_request", "{body}");
+    }
+
+    /// The response says what the job actually got, so a caller never has to
+    /// infer it from the backend it happened to be given.
+    #[tokio::test]
+    async fn the_response_reports_the_network_the_job_had() {
+        let f = fixture("run-network-report");
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","budi"],"entrypoint":"true"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The process backend shares the host network, so that is what it
+        // reports rather than pretending otherwise.
+        assert_eq!(body["network"], "open", "{body}");
+    }
+
+    /// The process backend cannot give a job no network, so asking for it is a
+    /// refusal rather than a quiet grant of the whole host network.
+    #[tokio::test]
+    async fn the_process_backend_refuses_to_promise_no_network() {
+        let f = fixture("run-nonet");
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","budi"],"entrypoint":"true","network":"none"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(
             body["error"]["code"], "backend_cannot_honour_request",

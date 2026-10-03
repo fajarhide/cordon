@@ -58,6 +58,7 @@ fn build(tag: &str, token: Option<String>) -> Fixture {
         token,
         backend: "process".into(),
         image: "alpine:3.20".into(),
+        container_cli: "docker".into(),
         artifact_ttl: std::time::Duration::from_secs(3600),
         max_wall_ms: 10_000,
         max_memory_mb: 256,

@@ -35,6 +35,8 @@ export interface RunResult {
   stderr: string;
   truncated: boolean;
   duration_ms: number;
+  /** What the job actually got, which is not always what it asked for. */
+  network: "none" | "open";
   artifacts: Artifact[];
 }
 
@@ -45,7 +47,14 @@ export interface RunRequest {
   stdin?: string;
   collect?: string[];
   inherit?: boolean;
-  egress?: string[];
+  /**
+   * "none" gives the job no network. "open" gives it the host's outbound
+   * access: there is no packet filter in v1, so open means open. Absent lets
+   * the backend use what it can provide, and `RunResult.network` says which.
+   */
+  network?: "none" | "open";
+  /** Name to address pins, only with "open". A convenience, not a restriction. */
+  hosts?: Record<string, string>;
   backend?: "process" | "container";
   limits?: { wall_ms: number; memory_mb: number; stdout_kb: number };
 }

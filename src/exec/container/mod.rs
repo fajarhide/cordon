@@ -1,11 +1,15 @@
 //! The backend for code you did not write.
 //!
-//! It shells out to the `docker` CLI rather than taking a Docker SDK
-//! dependency. The CLI is the interface every operator already has, it works
-//! unchanged against podman's docker alias, and it keeps a large async client
-//! library out of a security boundary.
+//! It shells out to a container CLI rather than taking an SDK dependency. The
+//! CLI is the interface every operator already has, and it keeps a large async
+//! client library out of a security boundary.
+//!
+//! `CORDON_CONTAINER_CLI` picks it: `docker` by default, `podman` where that is
+//! what the host has. The README used to claim docker worked "unchanged against
+//! podman's docker alias", which is only true on a host that installed the
+//! shim; plenty have podman and no `docker` binary at all.
 
-pub mod egress;
+pub mod hosts;
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -13,25 +17,28 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{read_capped, ExecError, Job, Outcome};
+use super::{read_capped, ExecError, Job, Network, Outcome};
 
 const PIDS_LIMIT: &str = "128";
 
-pub async fn run(image: &str, job: Job) -> Result<Outcome, ExecError> {
-    // Arguments are built before the daemon is probed, so a malformed egress
-    // entry is a request error rather than reported as docker being down.
-    let args = docker_args_as(image, &job, current_ids()?)?;
-    docker_reachable().await?;
+pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError> {
+    // The network a container can actually have, which is whatever was asked
+    // for: this backend can provide both.
+    let network = job.network.clone().unwrap_or_default();
+    // Arguments are built before the runtime is probed, so a malformed host pin
+    // is a request error rather than reported as the runtime being down.
+    let args = container_args(image, &job, &network, current_ids()?)?;
+    cli_reachable(cli).await?;
 
     let started = Instant::now();
-    let mut child = Command::new("docker")
+    let mut child = Command::new(cli)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| ExecError::BackendUnavailable(format!("docker: {e}")))?;
+        .map_err(|e| ExecError::BackendUnavailable(format!("{cli}: {e}")))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.stdin.as_bytes()).await;
@@ -60,6 +67,7 @@ pub async fn run(image: &str, job: Job) -> Result<Outcome, ExecError> {
             stderr,
             truncated: ot || et,
             duration_ms: started.elapsed().as_millis(),
+            network: network.clone(),
         }),
         Err(_) => Ok(Outcome {
             exit_code: 124,
@@ -67,6 +75,7 @@ pub async fn run(image: &str, job: Job) -> Result<Outcome, ExecError> {
             stderr: format!("killed after {}ms", job.limits.wall_ms),
             truncated: true,
             duration_ms: started.elapsed().as_millis(),
+            network,
         }),
     }
 }
@@ -98,7 +107,12 @@ fn current_ids() -> Result<String, ExecError> {
 /// Builds the argument list. Split out from `run` so the isolation policy can
 /// be asserted in a unit test with no Docker daemon anywhere near it, which is
 /// the only way these flags get reviewed on every change.
-pub fn docker_args_as(image: &str, job: &Job, user: String) -> Result<Vec<String>, ExecError> {
+pub fn container_args(
+    image: &str,
+    job: &Job,
+    network: &Network,
+    user: String,
+) -> Result<Vec<String>, ExecError> {
     let mut a: Vec<String> = vec![
         "run".into(),
         "--rm".into(),
@@ -121,7 +135,7 @@ pub fn docker_args_as(image: &str, job: &Job, user: String) -> Result<Vec<String
         "-w".into(),
         "/workspace".into(),
     ];
-    a.extend(network_args(job)?);
+    a.extend(network_args(network)?);
 
     // The image and everything after it belong to the job, never to docker.
     // Nothing may be appended past this point, which is what the ordering test
@@ -132,15 +146,25 @@ pub fn docker_args_as(image: &str, job: &Job, user: String) -> Result<Vec<String
     Ok(a)
 }
 
-fn network_args(job: &Job) -> Result<Vec<String>, ExecError> {
-    if job.egress.is_empty() {
-        return Ok(vec!["--network".into(), "none".into()]);
+fn network_args(network: &Network) -> Result<Vec<String>, ExecError> {
+    match network {
+        Network::None => Ok(vec!["--network".into(), "none".into()]),
+        Network::Open { pins } => {
+            let mut a = vec!["--network".into(), "bridge".into()];
+            for p in pins {
+                // A name to address pin, nothing more. The resolver stays on,
+                // because turning it off was the thing that made this look
+                // like a boundary while leaving every address reachable.
+                a.push("--add-host".into());
+                a.push(format!("{}:{}", p.name, p.addr));
+            }
+            Ok(a)
+        }
     }
-    egress::args(&job.egress)
 }
 
-async fn docker_reachable() -> Result<(), ExecError> {
-    let probe = Command::new("docker")
+async fn cli_reachable(cli: &str) -> Result<(), ExecError> {
+    let probe = Command::new(cli)
         .args(["version", "--format", "{{.Server.Version}}"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -167,6 +191,13 @@ mod tests {
     use crate::exec::{Backend, Limits};
     use std::path::PathBuf;
 
+    /// Which runtime the live tests use. `CORDON_CONTAINER_CLI=podman cargo
+    /// test` points them at podman, which is what plenty of hosts have instead
+    /// of docker, and is how the host-gateway failure in #11 was found.
+    fn cli() -> String {
+        std::env::var("CORDON_CONTAINER_CLI").unwrap_or_else(|_| "docker".into())
+    }
+
     fn job(script: &str) -> Job {
         Job {
             workspace: PathBuf::from("/ws"),
@@ -178,34 +209,28 @@ mod tests {
                 memory_mb: 128,
                 stdout_kb: 64,
             },
-            egress: vec![],
-            // Linux gets a real boundary from landlock, so CI enforces it.
-            // Everywhere else there is nothing to enforce, so the suite runs
-            // without one and the boundary itself is tested only on Linux.
+            network: None,
             unsafe_process: cfg!(not(target_os = "linux")),
         }
     }
 
-    /// A live container test skips on a laptop with no docker and fails where
-    /// docker is supposed to be there. Deciding it inside the test means CI
-    /// needs no second cargo run and no grep over its output, which is how the
-    /// previous version of this check went flaky.
-    async fn docker_or_skip(test: &str) -> bool {
-        if docker_reachable().await.is_ok() {
-            return true;
-        }
-        assert!(
-            std::env::var("CORDON_REQUIRE_DOCKER").is_err(),
-            "{test}: CORDON_REQUIRE_DOCKER is set but the docker probe failed"
-        );
-        eprintln!("SKIPPED {test}: no docker here");
-        false
+    fn args_for(j: &Job, net: &Network) -> Vec<String> {
+        container_args("alpine:3.20", j, net, "1000:1000".into()).unwrap()
     }
 
     fn joined(j: &Job) -> String {
-        docker_args_as("alpine:3.20", j, "1000:1000".into())
-            .unwrap()
-            .join(" ")
+        args_for(j, &Network::None).join(" ")
+    }
+
+    fn pins(pairs: &[(&str, &str)]) -> Network {
+        use std::collections::BTreeMap;
+        let m: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Network::Open {
+            pins: hosts::parse(m.iter()).unwrap(),
+        }
     }
 
     #[test]
@@ -228,8 +253,6 @@ mod tests {
 
     #[test]
     fn the_job_never_runs_as_root() {
-        // The daemon's own uid, which is what makes the bind mount writable.
-        // Root is refused outright, which current_ids covers.
         assert!(
             joined(&job("true")).contains("--user 1000:1000"),
             "no --user pinned"
@@ -238,9 +261,6 @@ mod tests {
 
     #[test]
     fn a_container_job_refuses_to_run_as_root() {
-        // current_ids is what enforces it; this asserts the message an
-        // operator sees, since the condition itself depends on who runs the
-        // test suite.
         let msg = match current_ids() {
             Err(ExecError::Unsupported(m)) => m,
             _ => return, // not running as root, nothing to assert here
@@ -250,13 +270,12 @@ mod tests {
 
     #[test]
     fn a_writable_tmpfs_exists_but_cannot_execute() {
-        let a = joined(&job("true"));
-        assert!(a.contains("--tmpfs /tmp:rw,noexec,nosuid"), "{a}");
+        assert!(joined(&job("true")).contains("--tmpfs /tmp:rw,noexec,nosuid"));
     }
 
     #[test]
     fn the_image_and_entrypoint_come_last_so_no_flag_can_follow() {
-        let args = docker_args_as("alpine:3.20", &job("echo hi"), "1000:1000".into()).unwrap();
+        let args = args_for(&job("echo hi"), &Network::None);
         let image_at = args.iter().position(|a| a == "alpine:3.20").unwrap();
         assert_eq!(args[image_at + 1], "sh");
         assert!(
@@ -265,51 +284,89 @@ mod tests {
         );
     }
 
-    /// An entrypoint or argument that looks like a docker flag has to stay an
-    /// argument to the job, never a flag to docker.
+    /// An entrypoint or argument that looks like a flag has to stay an argument
+    /// to the job, never a flag to the container runtime.
     #[test]
     fn an_argument_that_looks_like_a_flag_is_not_treated_as_one() {
         let mut j = job("true");
         j.entrypoint = "--privileged".into();
-        let args = docker_args_as("alpine:3.20", &j, "1000:1000".into()).unwrap();
+        let args = args_for(&j, &Network::None);
         let image_at = args.iter().position(|a| a == "alpine:3.20").unwrap();
         assert_eq!(args[image_at + 1], "--privileged", "{args:?}");
         assert!(image_at > 0 && args[image_at - 1] != "--privileged");
     }
 
+    /// Issue #11. `open` means open, and the flags say so: a bridge and
+    /// nothing that pretends to filter. The old version added
+    /// `--dns 0.0.0.0`, which blocked name resolution and left every address
+    /// reachable, so it read as a boundary it never was.
     #[test]
-    fn a_malformed_egress_entry_is_a_request_error_not_a_backend_error() {
-        let mut j = job("true");
-        j.egress = vec!["--privileged:443".into()];
-        let err = docker_args_as("alpine:3.20", &j, "1000:1000".into()).unwrap_err();
-        assert!(matches!(err, ExecError::Unsupported(_)), "got {err:?}");
+    fn open_is_a_bridge_with_no_pretence_of_filtering() {
+        let a = args_for(&job("true"), &pins(&[("litellm.internal", "10.0.0.5")])).join(" ");
+        assert!(a.contains("--network bridge"), "{a}");
+        assert!(!a.contains("--network none"), "{a}");
+        assert!(
+            !a.contains("--dns"),
+            "a --dns flag is back, and it only ever looked like a filter: {a}"
+        );
+        assert!(a.contains("--add-host litellm.internal:10.0.0.5"), "{a}");
     }
 
-    /// Review Focus 4. Docker missing or stopped must be a clean
-    /// BackendUnavailable, never a panic and never a silent downgrade to the
-    /// weaker process backend.
+    #[test]
+    fn a_pin_carries_an_address_the_caller_gave_not_a_magic_name() {
+        let a = args_for(&job("true"), &pins(&[("db.internal", "10.0.0.9")])).join(" ");
+        assert!(
+            !a.contains("host-gateway"),
+            "host-gateway is back; it fails the container outright under rootless podman with netavark: {a}"
+        );
+    }
+
+    #[test]
+    fn no_network_takes_no_pins_and_stays_closed() {
+        let a = args_for(&job("true"), &Network::None).join(" ");
+        assert!(a.contains("--network none"), "{a}");
+        assert!(!a.contains("--add-host"), "{a}");
+    }
+
+    /// Review Focus 4. A missing runtime must be a clean BackendUnavailable,
+    /// never a panic and never a silent downgrade to the weaker backend.
+    ///
+    /// Names a runtime that cannot exist rather than emptying PATH. The
+    /// earlier version did the latter, and since tests run in parallel it
+    /// clobbered PATH underneath the two live container tests, which then
+    /// reported the runtime as missing. It only looked harmless because this
+    /// machine had no docker for the probe to find either way.
     #[tokio::test]
-    async fn a_missing_docker_is_reported_not_worked_around() {
-        // PATH is emptied rather than DOCKER_HOST set, so the probe fails the
-        // same way on a machine that has no docker binary at all.
-        let saved = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", "/nonexistent");
+    async fn a_missing_runtime_is_reported_not_worked_around() {
         let err = Backend::Container {
             image: "alpine:3.20".into(),
+            cli: "cordon-no-such-runtime".into(),
         }
         .run(job("true"))
         .await
-        .expect_err("must refuse when docker is unreachable");
-        std::env::set_var("PATH", saved);
+        .expect_err("must refuse when the runtime is unreachable");
         assert!(
             matches!(err, ExecError::BackendUnavailable(_)),
             "got {err:?}"
         );
     }
 
+    async fn runtime_or_skip(test: &str) -> bool {
+        if cli_reachable(&cli()).await.is_ok() {
+            return true;
+        }
+        assert!(
+            std::env::var("CORDON_REQUIRE_DOCKER").is_err(),
+            "{test}: CORDON_REQUIRE_DOCKER is set but the {} probe failed",
+            cli()
+        );
+        eprintln!("SKIPPED {test}: no {} here", cli());
+        false
+    }
+
     #[tokio::test]
-    async fn runs_a_real_container_when_docker_is_present() {
-        if !docker_or_skip("runs_a_real_container_when_docker_is_present").await {
+    async fn runs_a_real_container_when_a_runtime_is_present() {
+        if !runtime_or_skip("runs_a_real_container_when_a_runtime_is_present").await {
             return;
         }
         let ws = std::env::temp_dir().join(format!("cordon-ctr-{}", std::process::id()));
@@ -319,6 +376,7 @@ mod tests {
 
         let out = Backend::Container {
             image: "alpine:3.20".into(),
+            cli: cli(),
         }
         .run(j)
         .await
@@ -333,12 +391,13 @@ mod tests {
                 .expect("the job could not write to its own workspace"),
             b"hi"
         );
+        assert_eq!(out.network, Network::None);
         let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[tokio::test]
     async fn a_container_has_no_network_unless_asked() {
-        if !docker_or_skip("a_container_has_no_network_unless_asked").await {
+        if !runtime_or_skip("a_container_has_no_network_unless_asked").await {
             return;
         }
         let ws = std::env::temp_dir().join(format!("cordon-ctr-net-{}", std::process::id()));
@@ -347,6 +406,7 @@ mod tests {
         j.workspace = ws.clone();
         let out = Backend::Container {
             image: "alpine:3.20".into(),
+            cli: cli(),
         }
         .run(j)
         .await

@@ -5,17 +5,18 @@
 cordon gives every user, team and AI agent its own sandbox on disk, and decides
 whether a path the model chose belongs to the session it came from.
 
-> ### Every finding from the adversarial review is closed but one.
+> ### Every finding from the adversarial review is closed.
 >
 > A review on 3 Oct 2026 broke the isolation claim in five places and found
-> eight more issues. Thirteen are fixed with a regression test each. The one
-> still open is [#11](https://github.com/fajarhide/cordon/issues/11): the
-> container backend's egress allowlist blocks name resolution and not IP
-> routing, which is not reproduced yet and is understated in the table below.
+> nine more issues. All fourteen are fixed, each with a regression test, and
+> each closed issue carries its own reproducer and what changed. Read
+> [them](https://github.com/fajarhide/cordon/issues?q=is%3Aissue+is%3Aclosed)
+> before trusting any of this.
 >
-> Read [the closed issues](https://github.com/fajarhide/cordon/issues?q=is%3Aissue+is%3Aclosed)
-> before trusting any of this. Each one carries its own reproducer and what
-> changed.
+> The last one changed the API rather than the code. The egress allowlist
+> blocked name resolution and left every address reachable, measured on a real
+> host, so it was removed: a job now has `"network": "none"` or
+> `"network": "open"`, and open means open.
 
 ## Quick start
 
@@ -243,23 +244,43 @@ $ curl -s -X POST localhost:7777/v1/run -H 'content-type: application/json' -d '
     "args":["-c","mkdir -p out; printf hello > out/report.txt; echo done"],
     "collect":["out/*"],
     "backend":"container",
+    "network":"none",
     "limits":{"wall_ms":5000,"memory_mb":128,"stdout_kb":64}
   }'
 {"artifacts":[{"bytes":5,"path":"out/report.txt",
                "token":"art_ca0a49fb851175de1a08cb0dba96ddc2"}],
- "duration_ms":15,"exit_code":0,"stderr":"","stdout":"done\n","truncated":false}
+ "duration_ms":15,"exit_code":0,"network":"none","stderr":"","stdout":"done\n",
+ "truncated":false}
 
-$ curl -s localhost:7777/v1/artifact/art_ca0a49fb851175de1a08cb0dba96ddc2
+$ curl -s 'localhost:7777/v1/artifact/art_ca0a49fb851175de1a08cb0dba96ddc2?owner=acme/budi'
 hello
 
 $ curl -s 'localhost:7777/v1/artifact/art_ca0a49fb851175de1a08cb0dba96ddc2?owner=acme/ani'
 {"error":{"code":"artifact_not_found","message":"no such artifact"}}
 ```
 
+### Network
+
+```json
+{ "network": "none" }                                       // the default for a container
+{ "network": "open", "hosts": { "db.internal": "10.0.0.5" } }
+```
+
+`none` or `open`, and the response reports which one the job actually got. The
+`hosts` pins put names in the container's hosts file; they are a convenience for
+reaching an internal service by name and restrict nothing. An address, not a
+magic name: `host-gateway` meant different things on different network backends
+and failed the container outright under rootless podman with netavark.
+
+A request still sending the old `egress` field is refused with
+`egress_removed` rather than translated, so a caller learns the promise changed
+instead of inheriting it.
+
 Every refusal is a 4xx carrying a stable `code`: `invalid_owner`,
 `absolute_path_rejected`, `path_escapes_workspace`, `limit_exceeded`,
-`backend_cannot_honour_request`, `backend_unavailable`, `artifact_not_found`,
-`destination_exists`, `source_not_found`. Only a daemon fault is a 5xx.
+`backend_cannot_honour_request`, `backend_unavailable`, `backend_below_floor`,
+`artifact_not_found`, `destination_exists`, `source_not_found`,
+`egress_removed`. Only a daemon fault is a 5xx.
 
 ## Integrating with an agent runtime
 
@@ -394,17 +415,26 @@ The gaps are in the table too. A table of only wins is a table nobody believes.
 | wall clock and output size capped | yes | yes |
 | memory capped | `RLIMIT_AS`, advisory on macOS | yes, cgroup |
 | filesystem outside the sandbox | no, Landlock allowlist | no, read-only root |
-| network | **host network, wide open** | none by default |
-| egress allowlist | **refused, cannot honour it** | host level, not port level |
+| network | host network, always open | none by default, `open` on request |
+| outbound filtering | **none, and none offered** | **none, and none offered** |
 | runs as root | as the daemon's user | no, and refuses if cordon is root |
 | available without Landlock | **no, the job is refused** | yes |
 | kernel level escape | shares the host kernel | shares the host kernel |
 
-Two rows to read twice. The **process backend has no network isolation**: it is
-for code you wrote, on a box where that is already true. And the container
-backend's **egress allowlist is host level**: a job allowed to reach
-`db.internal:5432` can reach that host on any port. Both are v2 items, and both
-are stated here rather than left to be discovered.
+Two rows to read twice.
+
+The **process backend has no network isolation**. It is for code you wrote, on a
+box where that is already true. Asking it for `"network": "none"` is a refusal,
+not a silent grant.
+
+**There is no outbound filtering anywhere in v1.** A container job has no
+network or the host's full outbound access, nothing between. v0 shipped an
+"egress allowlist" that attached a bridge and set `--dns 0.0.0.0`; measured on a
+real host, a job with one allowlisted entry still reached `8.8.8.8:53` directly.
+`--dns` is not a packet filter. The feature is gone rather than documented,
+because a field named `egress` promising a boundary it does not have is worse
+than not offering one. A per-job network namespace with nftables rules is the
+real answer and is a v2 item.
 
 cordon shares the host kernel either way. A kernel level escape defeats it and
 nothing here claims otherwise. If your threat model needs a hypervisor, you need
@@ -424,8 +454,8 @@ before it execs so its filesystem view is the sandbox plus the system paths it
 needs to start. Needs Linux 5.13 or later; refuses to run a job without it.
 Runs on a 1 GB VPS with nothing installed.
 
-**container**, `CORDON_BACKEND=container`. Needs Docker, or podman's docker
-alias. Never needs KVM or nested virtualisation. `--network none`,
+**container**, `CORDON_BACKEND=container`. Needs Docker or podman, named by
+`CORDON_CONTAINER_CLI`. Never needs KVM or nested virtualisation. `--network none`,
 `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
 `--pids-limit 128`, and a `noexec` tmpfs for scratch. The job runs as the
 daemon's own uid, which is what keeps the bind-mounted sandbox writable from both
@@ -449,6 +479,7 @@ stronger backend than the operator configured and never a weaker one.
 | `CORDON_TOKEN` | unset | required for a non loopback listener |
 | `CORDON_BACKEND` | `process` | or `container` |
 | `CORDON_IMAGE` | `alpine:3.20` | the container backend's image |
+| `CORDON_CONTAINER_CLI` | `docker` | or `podman`. Plenty of hosts have one and not the other |
 | `CORDON_ARTIFACT_TTL` | `24h` | `s`, `m`, `h` or `d` |
 | `CORDON_MAX_WALL_MS` | `60000` | ceiling a request may lower, never raise |
 | `CORDON_MAX_MEMORY_MB` | `1024` | same |
@@ -465,7 +496,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 109 tests
+cargo test                                      # 116 tests
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -489,7 +520,7 @@ The budget is 20 MB and it is a test, not a sentence.
 
 ## Security
 
-109 tests, and four mutations each confirmed to break the suite.
+116 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the

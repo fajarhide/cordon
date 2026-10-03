@@ -17,6 +17,7 @@ pub const KEYS: &[&str] = &[
     "CORDON_TOKEN",
     "CORDON_BACKEND",
     "CORDON_IMAGE",
+    "CORDON_CONTAINER_CLI",
     "CORDON_ARTIFACT_TTL",
     "CORDON_MAX_WALL_MS",
     "CORDON_MAX_MEMORY_MB",
@@ -30,6 +31,8 @@ pub struct Config {
     pub token: Option<String>,
     pub backend: String,
     pub image: String,
+    /// `docker` or `podman`. A host often has one and not the other.
+    pub container_cli: String,
     pub artifact_ttl: Duration,
     pub max_wall_ms: u64,
     pub max_memory_mb: u64,
@@ -47,12 +50,19 @@ impl Config {
             token: std::env::var("CORDON_TOKEN").ok().filter(|t| !t.is_empty()),
             backend: env("CORDON_BACKEND", "process"),
             image: env("CORDON_IMAGE", "alpine:3.20"),
+            container_cli: env("CORDON_CONTAINER_CLI", "docker"),
             artifact_ttl: parse_duration(&env("CORDON_ARTIFACT_TTL", "24h"))?,
             max_wall_ms: env_u64("CORDON_MAX_WALL_MS", 60_000),
             max_memory_mb: env_u64("CORDON_MAX_MEMORY_MB", 1024),
             unsafe_process_backend: std::env::var("CORDON_UNSAFE_PROCESS_BACKEND").as_deref()
                 == Ok("1"),
         };
+        if cfg.container_cli != "docker" && cfg.container_cli != "podman" {
+            return Err(format!(
+                "CORDON_CONTAINER_CLI={:?} is not a runtime, want docker or podman",
+                cfg.container_cli
+            ));
+        }
         if cfg.backend != "process" && cfg.backend != "container" {
             return Err(format!(
                 "CORDON_BACKEND={:?} is not a backend, want process or container",
