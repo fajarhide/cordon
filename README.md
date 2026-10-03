@@ -184,6 +184,11 @@ Four pieces, and only the first one matters:
 
 ### How an owner maps onto disk
 
+![a job in acme/legal/budi opens its own file and one file in each parent, then is refused a sibling, another team and a symlink](assets/owners.gif)
+
+<details>
+<summary>The same thing as a static diagram</summary>
+
 ```mermaid
 flowchart TD
     ROOT["CORDON_ROOT/owners"] --> ACME["acme"]
@@ -196,6 +201,8 @@ flowchart TD
     style ANI fill:#f8d4d4,stroke:#7a2d2d
     style FIN fill:#f8d4d4,stroke:#7a2d2d
 ```
+
+</details>
 
 A job owned by `acme/legal/budi` reaches everything under the green box. With
 `inherit: true` it also reaches the files sitting directly in `acme/legal` and
@@ -583,11 +590,11 @@ from what the binary does:
 ```bash
 vhs tapes/demo.tape        # and verify.tape, usecase.tape
 python3 tapes/architecture.py /tmp/archframes
-python3 tapes/hero.py /tmp/heroframes
+python3 tapes/hero.py /tmp/heroframes     # and owners.py
 ```
 
 `tapes/serve.sh` starts the daemon the two live recordings talk to. The
-architecture and hero animations are SVG frames rendered with `rsvg-convert` and
+architecture, hero and owner animations are SVG frames rendered with `rsvg-convert` and
 assembled with `ffmpeg`; the command is in the header of `tapes/hero.py`.
 
 Footprint, measured by `tests/footprint.rs`, which starts the release binary,
