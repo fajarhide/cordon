@@ -74,6 +74,11 @@ jobs:
       - name: Build the release binary
         run: cargo build --release
 
+      # cordon passes --pull never, so every image a job uses has to be here
+      # before any daemon starts.
+      - name: Pull the sandbox image
+        run: docker pull -q alpine:3.20
+
       - name: Size and dependency count
         run: |
           ls -l target/release/cordon | awk '{printf "binary: %.1f MB\n", $5/1048576}'
@@ -162,8 +167,6 @@ jobs:
       - name: A container job runs with no network
         run: |
           set -euo pipefail
-          # cordon passes --pull never, so the image has to be there already.
-          docker pull -q alpine:3.20
           resp=$(curl -sS -X POST http://127.0.0.1:7777/v1/run \
             -H 'content-type: application/json' -H 'Authorization: Bearer ci-token' -d '{
               "owner":["acme","budi"],"entrypoint":"sh","backend":"container",
