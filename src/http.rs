@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -54,6 +55,44 @@ impl IntoResponse for ApiError {
             error["detail"] = detail;
         }
         (self.status, Json(json!({ "error": error }))).into_response()
+    }
+}
+
+/// A JSON body extractor that refuses in cordon's shape rather than axum's.
+///
+/// axum's own `Json` rejects a missing content type, an unparseable body and a
+/// missing field with plain text and three different statuses. The contract
+/// says every refusal is a 4xx carrying a stable `code`, and a client that
+/// branches on `error.code` got a parse failure instead. Found while recording
+/// a demo, which is its own small lesson about who reads the error path.
+pub struct ApiJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(v)) => Ok(ApiJson(v)),
+            // One code for every shape problem, because from a caller's side
+            // they are one problem: the body is not what the endpoint takes.
+            Err(e) => Err(ApiError::bad_request(
+                "invalid_request",
+                rejection_message(&e),
+            )),
+        }
+    }
+}
+
+fn rejection_message(e: &JsonRejection) -> String {
+    match e {
+        JsonRejection::MissingJsonContentType(_) => {
+            "the body must be sent with Content-Type: application/json".into()
+        }
+        other => other.body_text(),
     }
 }
 
@@ -234,6 +273,46 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "/v1/artifact was open");
+    }
+
+    /// Every refusal is a 4xx carrying a code, including the ones axum would
+    /// otherwise answer with plain text and three different statuses.
+    #[tokio::test]
+    async fn a_malformed_body_refuses_in_cordons_shape() {
+        use crate::testsupport::{fixture, post_typed};
+        let f = fixture("json-shape");
+
+        let cases: [(&str, &str, Option<&str>); 4] = [
+            (
+                "no content type",
+                r#"{"owner":["acme","budi"],"path":"a.md"}"#,
+                None,
+            ),
+            (
+                "wrong content type",
+                r#"{"owner":["acme","budi"],"path":"a.md"}"#,
+                Some("text/plain"),
+            ),
+            ("not json at all", "bukan json", Some("application/json")),
+            (
+                "a missing field",
+                r#"{"owner":["acme","budi"]}"#,
+                Some("application/json"),
+            ),
+        ];
+
+        for (name, body, ct) in cases {
+            let (status, out) = post_typed(&f, "/v1/resolve", body, None, ct).await;
+            assert!(status.is_client_error(), "{name}: status {status}");
+            assert_eq!(
+                out["error"]["code"], "invalid_request",
+                "{name}: the body was not cordon's error shape: {out}"
+            );
+            assert!(
+                out["error"]["message"].is_string(),
+                "{name}: no message to act on: {out}"
+            );
+        }
     }
 
     /// Health stays open so an operator's probe does not need the secret.

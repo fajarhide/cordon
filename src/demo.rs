@@ -11,8 +11,9 @@ use std::path::Path;
 
 use crate::guard::{Guard, GuardError};
 use crate::owner::Owner;
+use crate::style::Style;
 
-pub fn run(root: &Path, out: &mut impl Write) -> std::io::Result<bool> {
+pub fn run(root: &Path, out: &mut impl Write, s: Style) -> std::io::Result<bool> {
     let a = Owner::parse(&["demo".into(), "owner-a".into()]).map_err(std::io::Error::other)?;
     let b = Owner::parse(&["demo".into(), "owner-b".into()]).map_err(std::io::Error::other)?;
 
@@ -25,24 +26,34 @@ pub fn run(root: &Path, out: &mut impl Write) -> std::io::Result<bool> {
     std::os::unix::fs::symlink(b.dir(root).join("secret.md"), a.dir(root).join("peek"))?;
     std::os::unix::fs::symlink(b.dir(root), a.dir(root).join("theirs"))?;
 
-    writeln!(out, "cordon demo")?;
-    writeln!(out, "  root      {}", root.display())?;
+    writeln!(out, "{}", s.bold("cordon demo"))?;
+    writeln!(out, "  root      {}", s.dim(&root.display().to_string()))?;
     writeln!(out, "  owner a   {a}")?;
-    writeln!(out, "  owner b   {b}   holds secret.md")?;
+    writeln!(out, "  owner b   {b}   {}", s.dim("holds secret.md"))?;
     writeln!(
         out,
-        "  planted   a/peek and a/theirs, both symlinks into b\n"
+        "  planted   {}\n",
+        s.dim("a/peek and a/theirs, both symlinks into b")
     )?;
 
     let guard = Guard::new(root, &a, false);
 
-    writeln!(out, "owner a reads its own file")?;
+    writeln!(out, "{}", s.bold("owner a reads its own file"))?;
     match guard.resolve("notes.md") {
-        Ok(p) => writeln!(out, "  ok        notes.md -> {}\n", p.display())?,
-        Err(e) => writeln!(out, "  BROKEN    owner a cannot read its own file: {e}\n")?,
+        Ok(p) => writeln!(
+            out,
+            "  {}        notes.md -> {}\n",
+            s.green("ok"),
+            s.dim(&p.display().to_string())
+        )?,
+        Err(e) => writeln!(
+            out,
+            "  {}    owner a cannot read its own file: {e}\n",
+            s.red("BROKEN")
+        )?,
     }
 
-    writeln!(out, "owner a cannot read owner b, nine ways")?;
+    writeln!(out, "{}", s.bold("owner a cannot read owner b, nine ways"))?;
     let attempts: &[(&str, &str)] = &[
         ("parent then sibling", "../owner-b/secret.md"),
         ("many parents", "../../../../../../etc/passwd"),
@@ -60,18 +71,30 @@ pub fn run(root: &Path, out: &mut impl Write) -> std::io::Result<bool> {
         match guard.resolve(rel) {
             Err(e) => {
                 refused += 1;
-                writeln!(out, "  refused   {name:<28} {}", code_of(&e))?;
+                writeln!(
+                    out,
+                    "  {}   {name:<28} {}",
+                    s.green("refused"),
+                    s.dim(code_of(&e))
+                )?;
             }
             Ok(p) => writeln!(
                 out,
-                "  ALLOWED   {name:<28} {}   <- this is a bug",
-                p.display()
+                "  {}   {name:<28} {}   {}",
+                s.red("ALLOWED"),
+                p.display(),
+                s.red("<- this is a bug")
             )?,
         }
     }
 
     let all = refused == attempts.len();
-    writeln!(out, "\n{refused} of {} attempts refused", attempts.len())?;
+    let tally = format!("{refused} of {} attempts refused", attempts.len());
+    writeln!(
+        out,
+        "\n{}",
+        if all { s.green(&tally) } else { s.red(&tally) }
+    )?;
     if all {
         writeln!(
             out,
@@ -109,7 +132,7 @@ mod tests {
     fn the_demo_refuses_every_attempt_and_says_so() {
         let root = tmp("refuse");
         let mut out = Vec::new();
-        let all_refused = run(&root, &mut out).expect("demo must not fail");
+        let all_refused = run(&root, &mut out, Style::plain()).expect("demo must not fail");
         let text = String::from_utf8(out).expect("utf8 output");
 
         assert!(
@@ -135,7 +158,7 @@ mod tests {
     fn the_demo_cleans_up_after_itself() {
         let root = tmp("clean");
         let mut out = Vec::new();
-        run(&root, &mut out).unwrap();
+        run(&root, &mut out, Style::plain()).unwrap();
         assert!(!root.exists(), "the demo left {} behind", root.display());
     }
 }

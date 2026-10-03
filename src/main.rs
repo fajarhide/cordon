@@ -14,6 +14,7 @@ mod owner;
 mod resolve;
 mod run;
 mod sandbox;
+mod style;
 #[cfg(test)]
 mod testsupport;
 mod verify;
@@ -26,7 +27,7 @@ cordon gives each owner an isolated workspace and refuses every path out of it.
   cordon serve             run the daemon
   cordon verify [addr] [token]
                            prove the guarantee against a running daemon
-  cordon demo              two owners, every escape refused, no daemon needed
+  cordon demo [root]       two owners, every escape refused, no daemon needed
 ";
 
 #[tokio::main]
@@ -49,7 +50,7 @@ async fn main() -> std::process::ExitCode {
             match verify::run(&addr, token.as_deref()).await {
                 Err(e) => Err(e),
                 Ok(checks) => {
-                    if verify::report(&checks, &mut std::io::stdout()) {
+                    if verify::report(&checks, &mut std::io::stdout(), style::Style::for_stdout()) {
                         Ok(())
                     } else {
                         return std::process::ExitCode::FAILURE;
@@ -58,8 +59,14 @@ async fn main() -> std::process::ExitCode {
             }
         }
         Some("demo") => {
-            let root = std::env::temp_dir().join(format!("cordon-demo-{}", std::process::id()));
-            match demo::run(&root, &mut std::io::stdout()) {
+            // An optional root, so a reader can point it somewhere they can
+            // watch, and so a recording of this does not show a machine's
+            // temp path.
+            let root = match args.get(1) {
+                Some(p) => std::path::PathBuf::from(p),
+                None => std::env::temp_dir().join(format!("cordon-demo-{}", std::process::id())),
+            };
+            match demo::run(&root, &mut std::io::stdout(), style::Style::for_stdout()) {
                 Ok(true) => Ok(()),
                 Ok(false) => return std::process::ExitCode::FAILURE,
                 Err(e) => Err(e.to_string()),

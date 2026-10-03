@@ -29,7 +29,12 @@ cordon demo
 
 `cordon demo` needs no daemon, no Docker and no configuration. It builds two
 sandboxes, plants the traps a real job would plant, and tries to break out of
-one into the other:
+one into the other.
+
+![cordon demo refusing nine escape attempts](assets/demo.gif)
+
+<details>
+<summary>The same output as text</summary>
 
 ```
 cordon demo
@@ -54,6 +59,8 @@ owner a cannot read owner b, nine ways
 
 9 of 9 attempts refused
 ```
+
+</details>
 
 Owner a has a symlink sitting in its own sandbox pointing straight at owner b's
 file. It still cannot read it, because cordon resolves the path on the
@@ -124,6 +131,16 @@ enforced by something the model cannot argue with.
 
 ## Architecture
 
+Three things happen here. A path the owner owns resolves. A path that leaves the
+sandbox is stopped at the guard and never reaches the filesystem. And a job runs
+in a backend, writes into its own sandbox, and cannot see a sibling's even
+though it is the one holding the file handle.
+
+![a request taking the allowed path, a second one being refused, and a job that cannot reach a sibling](assets/architecture.gif)
+
+<details>
+<summary>The same thing as a static diagram</summary>
+
 ```mermaid
 flowchart LR
     subgraph app["Your application"]
@@ -153,6 +170,8 @@ flowchart LR
     TOK -->|"token, never a path"| RT
     GUARD -.->|"refused: path_escapes_workspace"| SIB
 ```
+
+</details>
 
 Four pieces, and only the first one matters:
 
@@ -305,6 +324,19 @@ Three codes are 5xx and each one means the daemon rather than the request:
 read-only filesystem, a permission problem on `CORDON_ROOT`. Nothing a caller
 sends should produce one, and if it does, that is a bug worth an issue.
 
+## One use case, end to end
+
+An agent renders a report for Budi. Budi collects it. Ani presents the same
+token and is refused, and Ani's own job cannot find the file either, because
+inside its sandbox that file does not exist.
+
+![a job writes a report, its owner collects it, another owner is refused twice](assets/usecase.gif)
+
+Five beats, all real: the request Budi's app sends, the token that comes back
+instead of a path, the bytes for the owner it belongs to, a `404` for anyone
+else, and a job of Ani's reaching for the path directly and finding nothing
+there.
+
 ## Integrating with an agent runtime
 
 The whole integration is one call in front of your file tool.
@@ -348,7 +380,10 @@ It writes a secret as one owner and has another owner's job try to read it, by
 every shape the review used. It checks authentication, the parent-child owner
 pair, the backend floor, and all three ways of asking for an artifact.
 
-Pasted from a CI run on Linux, abridged in the middle:
+![cordon verify passing 22 checks against a running daemon](assets/verify.gif)
+
+<details>
+<summary>The same run as text, from CI on Linux, abridged in the middle</summary>
 
 ```
 $ cordon verify http://127.0.0.1:7777 $CORDON_TOKEN
@@ -373,6 +408,8 @@ ok   a zero memory limit is refused   status 400, code limit_exceeded
 
 all 22 checks passed
 ```
+
+</details>
 
 On a daemon configured for the process backend the floor check reports
 `skip  a weaker backend is refused   this daemon is configured for the process
@@ -537,6 +574,18 @@ rootless podman: cordon called `docker` unconditionally, the old `host-gateway`
 pin failed the container outright under netavark, and without `--userns keep-id`
 a job could not write to its own sandbox. The last one passes on a Mac, because
 podman machine maps uids differently.
+
+The recordings in this README are generated, not hand made, so they cannot drift
+from what the binary does:
+
+```bash
+vhs tapes/demo.tape        # and verify.tape, usecase.tape
+python3 tapes/architecture.py /tmp/archframes
+```
+
+`tapes/serve.sh` starts the daemon the two live recordings talk to. The
+architecture animation is SVG frames rendered with `rsvg-convert` and assembled
+with `ffmpeg`; the command is in the header of `tapes/architecture.py`.
 
 Footprint, measured by `tests/footprint.rs`, which starts the release binary,
 waits for it to answer, sends it 50 requests, checks it is still answering, and
