@@ -65,21 +65,35 @@ jobs:
         run: |
           mkdir -p /tmp/cordon-ci
           CORDON_ROOT=/tmp/cordon-ci CORDON_LISTEN=tcp:127.0.0.1:7777 \
-            ./target/release/cordon serve &
+            CORDON_TOKEN=ci-token ./target/release/cordon serve &
           for _ in $(seq 40); do
             curl -sf http://127.0.0.1:7777/v1/health >/dev/null && break
             sleep 0.25
           done
           curl -sf http://127.0.0.1:7777/v1/health
 
+      # With a token, so the auth checks run rather than skip, and on Linux,
+      # so the data plane checks run rather than skip. Both are the point.
       - name: cordon verify
-        run: ./target/release/cordon verify http://127.0.0.1:7777
+        run: ./target/release/cordon verify http://127.0.0.1:7777 ci-token
+
+      # A run with no credentials must not report success: every check skips,
+      # nothing passes, and the exit code has to say so.
+      - name: cordon verify refuses to pass without credentials
+        run: |
+          if ./target/release/cordon verify http://127.0.0.1:7777 > /tmp/noauth.txt 2>&1; then
+            echo "verify exited 0 with no credentials:"
+            cat /tmp/noauth.txt
+            exit 1
+          fi
+          grep -q "Nothing was actually tested" /tmp/noauth.txt
+          echo "an all-skip run exits non-zero, as it should"
 
       - name: A job writes a file and gets a token back
         run: |
           set -euo pipefail
           resp=$(curl -sS -X POST http://127.0.0.1:7777/v1/run \
-            -H 'content-type: application/json' -d '{
+            -H 'content-type: application/json' -H 'Authorization: Bearer ci-token' -d '{
               "owner":["acme","budi"],"entrypoint":"sh",
               "args":["-c","mkdir -p out; printf hello > out/r.txt; echo done"],
               "collect":["out/*"],
@@ -88,13 +102,17 @@ jobs:
           token=$(echo "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
           test -n "$token" || { echo "no token minted"; exit 1; }
 
-          body=$(curl -sS "http://127.0.0.1:7777/v1/artifact/$token")
+          body=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/$token?owner=acme/budi")
           test "$body" = "hello" || { echo "artifact body was $body"; exit 1; }
 
           # The same token, a different owner. Must be refused, and must look
           # identical to a token that never existed.
-          wrong=$(curl -sS "http://127.0.0.1:7777/v1/artifact/$token?owner=acme/ani")
-          fake=$(curl -sS "http://127.0.0.1:7777/v1/artifact/art_ffffffffffffffffffffffffffffffff?owner=acme/ani")
+          wrong=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/$token?owner=acme/ani")
+          fake=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/art_ffffffffffffffffffffffffffffffff?owner=acme/ani")
+          bare=$(curl -sS -H 'Authorization: Bearer ci-token' "http://127.0.0.1:7777/v1/artifact/$token")
+          test "$bare" = "$fake" || {
+            echo "a fetch with no owner is distinguishable from an unknown token"
+            echo "bare: $bare"; echo "fake: $fake"; exit 1; }
           test "$wrong" = "$fake" || {
             echo "a wrong-owner refusal is distinguishable from an unknown token"
             echo "wrong: $wrong"; echo "fake:  $fake"; exit 1; }
@@ -105,7 +123,7 @@ jobs:
           set -euo pipefail
           docker pull -q alpine:3.20
           resp=$(curl -sS -X POST http://127.0.0.1:7777/v1/run \
-            -H 'content-type: application/json' -d '{
+            -H 'content-type: application/json' -H 'Authorization: Bearer ci-token' -d '{
               "owner":["acme","budi"],"entrypoint":"sh","backend":"container",
               "args":["-c","wget -q -T 3 -O - https://example.com || echo BLOCKED"],
               "limits":{"wall_ms":30000,"memory_mb":128,"stdout_kb":64}}')

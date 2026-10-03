@@ -55,9 +55,19 @@ describe("Cordon", () => {
     const res = await c.run({ owner: ["acme", "budi"], entrypoint: "true" });
     expect(res.artifacts[0].token).toBe("art_abc");
 
-    const bytes = new Uint8Array(await c.artifact("art_abc"));
+    const bytes = new Uint8Array(await c.artifact("art_abc", ["acme", "budi"]));
     expect([...bytes]).toEqual([104, 105]);
-    expect(calls[1]).toBe("http://x/v1/artifact/art_abc");
+    expect(calls[1]).toBe("http://x/v1/artifact/art_abc?owner=acme%2Fbudi");
+  });
+
+  test("the owner is sent url encoded, so a segment cannot smuggle a separator", async () => {
+    let seen = "";
+    const c = new Cordon("http://x", async (url) => {
+      seen = url;
+      return new Response(new Uint8Array([1]));
+    });
+    await c.artifact("art_abc", ["acme", "legal", "budi"]);
+    expect(seen).toBe("http://x/v1/artifact/art_abc?owner=acme%2Flegal%2Fbudi");
   });
 
   test("a non JSON error body still produces a CordonError, not a parse crash", async () => {

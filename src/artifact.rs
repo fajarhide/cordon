@@ -19,6 +19,10 @@ use crate::owner::Owner;
 
 #[derive(Deserialize)]
 pub struct ArtifactQuery {
+    /// Required. Issue #8: this was an Option, so omitting it skipped the owner
+    /// check entirely and a token became a pure bearer credential. Naming the
+    /// wrong owner was refused while naming none was not, which made the
+    /// stricter call the one that failed.
     pub owner: Option<String>,
 }
 
@@ -69,10 +73,11 @@ pub async fn handler(
     if now_secs() >= expires {
         return Err(gone());
     }
-    if let Some(asked) = q.owner.as_deref() {
-        if asked != owner {
-            return Err(gone());
-        }
+    // Required, and compared against the record. Absent is a refusal, not a
+    // skip.
+    match q.owner.as_deref() {
+        Some(asked) if asked == owner => {}
+        _ => return Err(gone()),
     }
     let bytes = std::fs::read(&path).map_err(|_| gone())?;
     let name = path
@@ -138,9 +143,27 @@ mod tests {
         let file = budi().dir(&f.cfg.root).join("notes.md");
         let token = mint(&f.cfg, &budi(), &file).unwrap();
 
-        let (status, body) = get(&f, &format!("/v1/artifact/{token}")).await;
+        let (status, body) = get(&f, &format!("/v1/artifact/{token}?owner=acme/budi")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, b"mine");
+    }
+
+    /// Issue #8. The owner is required, so omitting it cannot be the way past
+    /// the check.
+    #[tokio::test]
+    async fn a_fetch_without_an_owner_is_refused() {
+        let f = fixture("art-noowner");
+        let file = budi().dir(&f.cfg.root).join("notes.md");
+        let token = mint(&f.cfg, &budi(), &file).unwrap();
+
+        let (bare, bare_body) = get(&f, &format!("/v1/artifact/{token}")).await;
+        let (wrong, wrong_body) = get(&f, &format!("/v1/artifact/{token}?owner=acme/ani")).await;
+
+        assert_eq!(bare, StatusCode::NOT_FOUND, "a bare fetch succeeded");
+        // And it looks the same as the wrong owner, so the laxer call is not
+        // the more informative one.
+        assert_eq!(bare, wrong);
+        assert_eq!(bare_body, wrong_body);
     }
 
     #[tokio::test]

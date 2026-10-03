@@ -183,6 +183,56 @@ mod tests {
         assert_eq!(body["skipped_links"], 1, "{body}");
     }
 
+    /// Issue #7, the part of it that was a real amplification. Forking a
+    /// parent owner used to carry every descendant owner with it, because
+    /// copy_tree recursed over a directory that contained them. The workspace
+    /// leaf from #2 means a parent's source is now its own files only.
+    #[tokio::test]
+    async fn forking_a_parent_does_not_carry_its_descendants() {
+        let f = fixture("fork-parent");
+        let acme = owner_dir(&f.cfg.root, &["acme"]);
+        std::fs::create_dir_all(&acme).unwrap();
+        std::fs::write(acme.join("top.md"), b"ACME-TOP").unwrap();
+
+        let (status, body) = post(&f, "/v1/fork", r#"{"from":["acme"],"to":["taker"]}"#).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let taker = owner_dir(&f.cfg.root, &["taker"]);
+        assert_eq!(std::fs::read(taker.join("top.md")).unwrap(), b"ACME-TOP");
+
+        // Nothing belonging to budi or ani came along.
+        let mut carried = Vec::new();
+        for e in walkdir(&taker) {
+            let name = e.file_name().unwrap().to_string_lossy().to_string();
+            if name == "notes.md" || name == "secret.md" {
+                carried.push(e.display().to_string());
+            }
+        }
+        assert!(
+            carried.is_empty(),
+            "a fork of the parent carried descendant owners' files: {carried:?}"
+        );
+    }
+
+    fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
     #[tokio::test]
     async fn a_missing_source_is_404() {
         let f = fixture("fork-nosource");

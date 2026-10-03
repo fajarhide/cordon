@@ -50,13 +50,7 @@ pub async fn handler(
     // refuses every first-time owner: the parent it would canonicalise is not
     // there yet.
     let workspace = owner.dir(&cfg.root);
-    std::fs::create_dir_all(&workspace).map_err(|e| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "workspace_unavailable",
-            e.to_string(),
-        )
-    })?;
+    std::fs::create_dir_all(&workspace).map_err(|e| workspace_error(e, &owner))?;
 
     // Collect patterns are checked before the job runs, so a job never does
     // work only to be told afterwards that its output was unreachable.
@@ -119,7 +113,15 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
         memory_mb: cfg.max_memory_mb,
         stdout_kb: 256,
     });
-    if l.wall_ms == 0 || l.wall_ms > cfg.max_wall_ms || l.memory_mb > cfg.max_memory_mb {
+    // memory_mb == 0 used to pass: the process backend skipped RLIMIT_AS
+    // behind `if memory_bytes > 0` and the container backend emitted
+    // `--memory 0m`, which docker reads as unlimited. Lowering a limit to zero
+    // is not a lower limit, it is no limit (issue #9).
+    if l.wall_ms == 0
+        || l.memory_mb == 0
+        || l.wall_ms > cfg.max_wall_ms
+        || l.memory_mb > cfg.max_memory_mb
+    {
         return Err(ApiError::bad_request(
             "limit_exceeded",
             "a requested limit is zero or above the configured ceiling",
@@ -168,6 +170,32 @@ fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> 
     }
 }
 
+/// An owner the filesystem cannot hold is the caller's fault, not the daemon's.
+///
+/// Issue #10: both of these came back as 500 `workspace_unavailable`, which put
+/// a bad request in someone's error budget. `AlreadyExists` means a path
+/// component is a file, usually an owner segment that names one; the name
+/// length errors mean the owner is valid to cordon and impossible on disk.
+fn workspace_error(e: std::io::Error, owner: &Owner) -> ApiError {
+    use std::io::ErrorKind;
+    let is_too_long = e.raw_os_error() == Some(libc::ENAMETOOLONG);
+    if matches!(
+        e.kind(),
+        ErrorKind::AlreadyExists | ErrorKind::NotADirectory
+    ) || is_too_long
+    {
+        return ApiError::bad_request(
+            "invalid_owner",
+            format!("owner {owner} cannot be a directory on this filesystem: {e}"),
+        );
+    }
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "workspace_unavailable",
+        e.to_string(),
+    )
+}
+
 /// A missing backend is a 503 and never a fallback. The caller asked for
 /// container isolation; handing it the process backend instead would be giving
 /// it less than it asked for without saying so.
@@ -206,6 +234,14 @@ fn collect(
                 continue;
             };
             if !real.starts_with(&real_ws) {
+                continue;
+            }
+            // Issue #6: a hardlink has nothing to resolve, so canonicalize
+            // says it is inside the sandbox while the inode is someone
+            // else's. A file a job just produced has one link; more than one
+            // means it is also reachable under another name, and this is not
+            // the place to work out whose.
+            if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
                 continue;
             }
             let rel = path
@@ -287,7 +323,7 @@ mod tests {
         assert_eq!(arts[0]["bytes"], 2);
 
         let token = arts[0]["token"].as_str().unwrap();
-        let (st, bytes) = get(&f, &format!("/v1/artifact/{token}")).await;
+        let (st, bytes) = get(&f, &format!("/v1/artifact/{token}?owner=acme/budi")).await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(bytes, b"hi");
     }
@@ -324,6 +360,72 @@ mod tests {
             0,
             "a symlink out of the workspace was minted a token: {body}"
         );
+    }
+
+    /// Issue #6. A hardlink passes the canonicalize check, because there is
+    /// nothing to resolve, so the link count is what catches it.
+    #[tokio::test]
+    async fn a_hardlink_to_another_owners_file_is_not_collected() {
+        let f = fixture("run-hardlink");
+        let payload = r#"{"owner":["acme","budi"],"entrypoint":"sh",
+            "args":["-c","mkdir -p out; ln ../../ani/.workspace/secret.md out/stolen.md 2>/dev/null; printf mine > out/own.txt"],
+            "collect":["out/*"],
+            "limits":{"wall_ms":5000,"memory_mb":128,"stdout_kb":64}}"#;
+        let (status, body) = post(&f, "/v1/run", payload).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let paths: Vec<&str> = body["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["path"].as_str().unwrap())
+            .collect();
+        assert!(
+            !paths.contains(&"out/stolen.md"),
+            "a hardlink was minted a token: {body}"
+        );
+        // The job's own file still comes back, so the check is not just
+        // refusing everything.
+        assert!(paths.contains(&"out/own.txt"), "{body}");
+    }
+
+    /// Issue #9. Lowering the memory limit to zero is not a lower limit, it is
+    /// no limit: the process backend skipped RLIMIT_AS and docker read
+    /// `--memory 0m` as unlimited.
+    #[tokio::test]
+    async fn a_zero_memory_limit_is_refused() {
+        let f = fixture("run-zeromem");
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","budi"],"entrypoint":"true","limits":{"wall_ms":1000,"memory_mb":0,"stdout_kb":8}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "limit_exceeded", "{body}");
+    }
+
+    /// Issue #10. An owner the filesystem cannot hold is a bad request, not a
+    /// broken daemon.
+    #[tokio::test]
+    async fn an_owner_the_filesystem_cannot_hold_is_a_4xx() {
+        let f = fixture("run-badowner-fs");
+        // acme/.workspace exists as a directory; name a file inside the tree
+        // that an owner segment would have to become a directory over.
+        std::fs::create_dir_all(f.cfg.root.join("owners/acme")).unwrap();
+        std::fs::write(f.cfg.root.join("owners/acme/blocked"), b"i am a file").unwrap();
+
+        let (status, body) = post(
+            &f,
+            "/v1/run",
+            r#"{"owner":["acme","blocked"],"entrypoint":"true"}"#,
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "a bad owner gave {status}, which lands in someone's error budget: {body}"
+        );
+        assert_eq!(body["error"]["code"], "invalid_owner", "{body}");
     }
 
     #[tokio::test]
