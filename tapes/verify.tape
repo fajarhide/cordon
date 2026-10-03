@@ -1,5 +1,4 @@
-# Proof against a running daemon. Not a claim in a README: a command that
-# exits non-zero when one of these lands.
+# cordon verify against a live daemon. It exits non-zero if an attack lands.
 Output assets/verify.gif
 
 Set Shell bash

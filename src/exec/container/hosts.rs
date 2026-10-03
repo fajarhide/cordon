@@ -1,23 +1,5 @@
-//! Name pins for a container that has network access.
-//!
-//! Issue #11, and the rename matters more than the code. This was
-//! `egress::args`, an "allowlist" that attached the container to a bridge and
-//! set `--dns 0.0.0.0`. That blocks name resolution and nothing else: measured
-//! on a real host, a job with one allowlisted entry still reached
-//! `8.8.8.8:53` directly. `--dns` is not a packet filter and never was, so the
-//! feature promised a boundary it did not have, which is worse than offering
-//! nothing.
-//!
-//! What is left is honest: a job either has no network or has the host's
-//! outbound access, and these pins are a convenience for naming an internal
-//! service, not a restriction. The field is called `hosts` and the mode is
-//! called `open` so neither can be misread.
-//!
-//! The pins take an address from the caller rather than the magic
-//! `host-gateway` name the old code used. `host-gateway` is unresolvable under
-//! rootless podman with netavark, where it fails the container outright, and
-//! resolves under slirp4netns, so what it meant depended on the network
-//! backend. An address the caller supplies means the same thing everywhere.
+//! Name pins for a container with network access: a convenience, not a restriction (#11).
+//! Pins take a caller-supplied address: `host-gateway` fails under rootless podman with netavark.
 
 use std::net::IpAddr;
 
@@ -55,8 +37,7 @@ where
     Ok(out)
 }
 
-/// An allowlist, not a blocklist. A name made only of letters, digits, dots and
-/// hyphens cannot become a container flag, a shell word or a CIDR.
+/// Allowlist: letters, digits, dots and hyphens cannot become a flag, a shell word or a CIDR.
 fn is_hostname(h: &str) -> bool {
     !h.is_empty()
         && h.len() <= 253
@@ -108,8 +89,7 @@ mod tests {
         }
     }
 
-    /// The magic name the old code used is gone: it meant different things on
-    /// different network backends and failed the container outright on one.
+    /// `host-gateway` is refused: its meaning depends on the network backend.
     #[test]
     fn refuses_an_address_that_is_not_an_ip() {
         for bad in [

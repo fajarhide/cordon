@@ -1,10 +1,5 @@
-//! `cordon demo` builds two owners in a temp directory, plants the traps a real
-//! job would plant, and runs every escape attempt through the guard directly.
-//!
-//! It needs no daemon, no Docker and no configuration, so it is the first thing
-//! a reader runs and the thing the README quotes. Keeping the claim and the
-//! command that prints it in one place is the point: a quoted block cannot
-//! drift from the code when the code is what printed it.
+//! `cordon demo` runs every escape attempt through the guard directly, with no daemon or Docker.
+//! The README quotes its output, so the claim cannot drift from the code that prints it.
 
 use std::io::Write;
 use std::path::Path;
@@ -21,8 +16,7 @@ pub fn run(root: &Path, out: &mut impl Write, s: Style) -> std::io::Result<bool>
     std::fs::create_dir_all(b.dir(root))?;
     std::fs::write(b.dir(root).join("secret.md"), b"owner b's private notes")?;
     std::fs::write(a.dir(root).join("notes.md"), b"owner a's own notes")?;
-    // The traps: a symlink to the sibling's file, and one to the sibling's
-    // directory so the escape hides in a path segment rather than the leaf.
+    // The second symlink hides the escape in a path segment rather than the leaf.
     std::os::unix::fs::symlink(b.dir(root).join("secret.md"), a.dir(root).join("peek"))?;
     std::os::unix::fs::symlink(b.dir(root), a.dir(root).join("theirs"))?;
 
@@ -108,8 +102,7 @@ pub fn run(root: &Path, out: &mut impl Write, s: Style) -> std::io::Result<bool>
     Ok(all)
 }
 
-/// The same code strings the HTTP surface returns, so the demo and the API
-/// tell one story.
+/// The same code strings the HTTP surface returns.
 fn code_of(e: &GuardError) -> &'static str {
     match e {
         GuardError::Absolute(_) => "absolute_path_rejected",

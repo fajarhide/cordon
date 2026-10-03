@@ -1,12 +1,5 @@
-//! Colour for the two commands a human reads: `demo` and `verify`.
-//!
-//! Bare ANSI codes rather than a crate. Four colours and a reset is not a
-//! dependency, and this is the only place in the project that writes any.
-//!
-//! Colour is decided by the caller and passed in, never sniffed at the point of
-//! writing. A test asserting on output must be able to get the plain text, and
-//! a tool whose output changes depending on where it is piped is a tool whose
-//! output cannot be tested.
+//! Colour for `demo` and `verify`, as bare ANSI codes: four colours do not justify a crate.
+//! The caller decides colour and passes it in, so a test can assert on plain text.
 
 #[derive(Clone, Copy)]
 pub struct Style {
@@ -14,11 +7,7 @@ pub struct Style {
 }
 
 impl Style {
-    /// On when stdout is a terminal and `NO_COLOR` is unset.
-    ///
-    /// `NO_COLOR` is honoured at any value including empty, per no-color.org,
-    /// which is the convention users expect rather than the one that is
-    /// convenient to implement.
+    /// On for a terminal unless `NO_COLOR` is set to any value, even empty (no-color.org).
     pub fn for_stdout() -> Self {
         let no_color = std::env::var_os("NO_COLOR").is_some();
         Style {
@@ -26,8 +15,7 @@ impl Style {
         }
     }
 
-    /// Test only. A caller that is not a terminal already gets this from
-    /// `for_stdout`, so there is no reason to reach for it in the binary.
+    /// Test only: a caller that is not a terminal already gets this from `for_stdout`.
     #[cfg(test)]
     pub fn plain() -> Self {
         Style { on: false }
@@ -82,8 +70,7 @@ mod tests {
     fn colour_wraps_and_always_resets() {
         let s = Style { on: true };
         assert_eq!(s.green("ok"), "\x1b[32mok\x1b[0m");
-        // An unterminated sequence bleeds into whatever the terminal prints
-        // next, including the user's prompt.
+        // An unterminated sequence bleeds into whatever the terminal prints next.
         for painted in [s.red("a"), s.yellow("b"), s.dim("c"), s.bold("d")] {
             assert!(painted.ends_with("\x1b[0m"), "{painted:?} does not reset");
         }

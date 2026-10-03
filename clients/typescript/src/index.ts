@@ -1,10 +1,6 @@
 /**
- * The cordon client. It builds requests and reads answers, and holds no rule of
- * its own: a rule implemented twice is a rule that drifts, so every decision
- * about what a path means belongs to the daemon.
- *
- * Apache 2.0, unlike the AGPL daemon, so linking this into a closed source
- * application is fine.
+ * Builds requests and reads answers. Every rule lives in the daemon, so it cannot drift.
+ * Apache 2.0, unlike the AGPL daemon.
  */
 
 export class CordonError extends Error {
@@ -48,9 +44,8 @@ export interface RunRequest {
   collect?: string[];
   inherit?: boolean;
   /**
-   * "none" gives the job no network. "open" gives it the host's outbound
-   * access: there is no packet filter in v1, so open means open. Absent lets
-   * the backend use what it can provide, and `RunResult.network` says which.
+   * "open" is the host's full outbound access, with no packet filter. Absent lets
+   * the backend choose, and `RunResult.network` says which.
    */
   network?: "none" | "open";
   /** Name to address pins, only with "open". A convenience, not a restriction. */
@@ -82,9 +77,7 @@ export class Cordon {
   }
 
   /**
-   * The owner is required. A token alone is not enough, deliberately: it is
-   * bound to one owner on the daemon and omitting the owner used to skip the
-   * check rather than fail it.
+   * The owner is required: a token is bound to one owner on the daemon (#8).
    */
   async artifact(token: string, owner: string[]): Promise<ArrayBuffer> {
     const q = encodeURIComponent(owner.join("/"));
@@ -110,8 +103,7 @@ export class Cordon {
       body: JSON.stringify(body),
     });
 
-    // A gateway in front of the daemon can answer with HTML, so the body is
-    // never assumed to be JSON.
+    // A gateway in front of the daemon can answer with HTML, so the body may not be JSON.
     let parsed: unknown;
     try {
       parsed = await res.json();

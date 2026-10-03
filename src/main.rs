@@ -1,6 +1,4 @@
-// deny rather than forbid: exec/process.rs needs exactly one unsafe block for
-// setrlimit between fork and exec, and forbid cannot be overridden where it is
-// genuinely required. Every other module inherits the deny.
+// deny, not forbid: exec and sandbox need unsafe for their syscalls, which forbid cannot allow.
 #![deny(unsafe_code)]
 
 mod artifact;
@@ -56,8 +54,7 @@ async fn main() -> std::process::ExitCode {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "http://127.0.0.1:7777".into());
-            // The token comes from the argument, or the environment, so a
-            // pipeline does not have to put a secret on a command line.
+            // Argument or environment, so a pipeline keeps the secret off the command line.
             let token = args
                 .get(1)
                 .cloned()
@@ -78,9 +75,7 @@ async fn main() -> std::process::ExitCode {
             }
         }
         Some("demo") => {
-            // An optional root, so a reader can point it somewhere they can
-            // watch, and so a recording of this does not show a machine's
-            // temp path.
+            // An optional root, so a reader can watch it and a recording shows no temp path.
             let root = match args.get(1) {
                 Some(p) => std::path::PathBuf::from(p),
                 None => std::env::temp_dir().join(format!("cordon-demo-{}", std::process::id())),
@@ -117,9 +112,8 @@ async fn serve() -> Result<(), String> {
     let cfg = Arc::new(config::Config::from_env()?);
     let app = http::router(Arc::clone(&cfg));
 
-    // An expired artifact is refused whether or not its record is still on
-    // disk; this only stops the records piling up. The first tick fires at
-    // once, so a restart sweeps too.
+    // Only stops records piling up: an expired artifact is refused either way.
+    // The first tick fires at once, so a restart sweeps too.
     let root = cfg.root.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));

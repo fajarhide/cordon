@@ -119,8 +119,7 @@ def where(keys, t):
     return keys[-1][1] if t >= keys[-1][0] else keys[0][1]
 
 
-# The shortcut crosses the wall here. Found by walking the curve, so it stays
-# right if the rooms move.
+# Found by walking the curve, so it stays right if the rooms move.
 LINK_U = next(u / 200 for u in range(201) if on_curve(LINK_FROM, LINK_TO, u / 200)[0] >= WALL)
 
 
@@ -135,7 +134,6 @@ def frame(i: int) -> str:
                   f'<tspan fill="{GREEN}" font-weight="bold">cordon is the wall.</tspan>',
                   SUBT, 17, "middle"))
 
-    # The server, seen from above.
     s.append(rect(60, 150, 1160, 400, LINE, "#232334", 1.5, 18, dash="7 5"))
     s.append(label(84, 180, "one server, one disk", SUBT, 13))
     s.append(label(1196, 180, "no VM per person", SUBT, 13, "end"))
@@ -164,7 +162,7 @@ def frame(i: int) -> str:
             s.append(rect(tx, ty, TILE_W, TILE_H, GREEN if lit else LINE, BASE, 2.5 if lit else 1, 8))
             s.append(label(tx + TILE_W / 2, ty + 27, fname, GREEN if lit else SUBT, 13, "middle"))
 
-    # First try: ask for the neighbour's file by its path.
+    # Asks for the neighbour's file by its path.
     k = fade(t, TRY1, TRY2)
     if k:
         hx, hy = home(ANI)
@@ -175,7 +173,7 @@ def frame(i: int) -> str:
                  f'stroke-width="5" stroke-linecap="round" opacity="{k:.2f}"/>')
         s.append(cross(WALL, HIT1[1], RED, 0.9, k))
 
-    # Second try: a shortcut inside its own room that points into sam's.
+    # A shortcut inside its own room that points into sam's.
     k = fade(t, TRY2, TRY3 + 0.3)
     if k:
         mx = (LINK_FROM[0] + LINK_TO[0]) / 2
@@ -188,7 +186,7 @@ def frame(i: int) -> str:
             s.append(packet(*on_curve(LINK_FROM, LINK_TO, LINK_U * ease((t - 7.0) / 0.6)), RED, r=5))
         s.append(cross(*on_curve(LINK_FROM, LINK_TO, LINK_U), RED, 0.9, fade(t, 7.6, TRY3 + 0.3)))
 
-    # Third try: leave the sandbox for the server itself.
+    # Leaves the sandbox for the server itself.
     k = fade(t, TRY3 + 0.3, CALM)
     if k:
         s.append(label(HIT3[0] + 30, HIT3[1] - 6, "/etc/passwd", RED, 13, opacity=k))

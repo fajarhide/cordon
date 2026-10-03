@@ -1,13 +1,5 @@
-//! The backend for code you did not write.
-//!
-//! It shells out to a container CLI rather than taking an SDK dependency. The
-//! CLI is the interface every operator already has, and it keeps a large async
-//! client library out of a security boundary.
-//!
-//! `CORDON_CONTAINER_CLI` picks it: `docker` by default, `podman` where that is
-//! what the host has. The README used to claim docker worked "unchanged against
-//! podman's docker alias", which is only true on a host that installed the
-//! shim; plenty have podman and no `docker` binary at all.
+//! The backend for code you did not write. `CORDON_CONTAINER_CLI` picks docker or podman.
+//! Shells out to the CLI rather than an SDK, keeping a large client out of a security boundary.
 
 pub mod hosts;
 
@@ -22,11 +14,9 @@ use super::{read_capped, ExecError, Job, Network, Outcome};
 const PIDS_LIMIT: &str = "128";
 
 pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError> {
-    // The network a container can actually have, which is whatever was asked
-    // for: this backend can provide both.
+    // Unasked means no network; this backend can provide either.
     let network = job.network.clone().unwrap_or_default();
-    // Arguments are built before the runtime is probed, so a malformed host pin
-    // is a request error rather than reported as the runtime being down.
+    // Built before probing the runtime, so a malformed host pin is a request error.
     let args = container_args(cli, image, &job, &network, current_ids()?)?;
     cli_reachable(cli).await?;
     image_present(cli, image).await?;
@@ -81,18 +71,8 @@ pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError>
     }
 }
 
-/// The uid:gid a container job runs as.
-///
-/// It is the daemon's own, not `nobody`. The workspace is a bind mount owned by
-/// the daemon's user, so a job running as 65534 cannot write to its own
-/// workspace: the redirect fails, and because a shell keeps going after a
-/// failed redirect the job can still exit 0 and look fine. CI caught exactly
-/// that.
-///
-/// Running as the daemon's uid keeps file ownership correct on both sides of
-/// the mount and is still unprivileged, as long as the daemon itself is not
-/// root. When it is, the container backend refuses rather than handing a job
-/// uid 0 inside a container that shares the host kernel.
+/// The daemon's own uid:gid, not `nobody`, which cannot write the daemon-owned bind mount.
+/// Refused when the daemon is root: that would be uid 0 in a container sharing the host kernel.
 fn current_ids() -> Result<String, ExecError> {
     // Reading the process's own ids. No pointers, no allocation, cannot fail.
     #[allow(unsafe_code)]
@@ -105,9 +85,7 @@ fn current_ids() -> Result<String, ExecError> {
     Ok(format!("{uid}:{gid}"))
 }
 
-/// Builds the argument list. Split out from `run` so the isolation policy can
-/// be asserted in a unit test with no Docker daemon anywhere near it, which is
-/// the only way these flags get reviewed on every change.
+/// Split from `run` so the isolation flags can be unit tested without a runtime.
 pub fn container_args(
     cli: &str,
     image: &str,
@@ -119,9 +97,7 @@ pub fn container_args(
         "run".into(),
         "--rm".into(),
         "-i".into(),
-        // The job's stderr is the job's. Without this the runtime's pull
-        // progress lands in it, which on a first run under podman meant six
-        // lines of registry chatter before the job had said anything.
+        // Without this the runtime's pull progress lands in the job's stderr.
         "--pull".into(),
         "never".into(),
         "--read-only".into(),
@@ -142,25 +118,15 @@ pub fn container_args(
         "-w".into(),
         "/workspace".into(),
     ];
-    // Rootless podman maps container uids to host subuids, so --user 1001
-    // means uid 1001 inside the container and something else entirely on the
-    // host. The bind-mounted workspace is owned by the host user, so without
-    // keep-id the job cannot write to its own sandbox: measured on a Linux
-    // runner, where `printf > out.txt` came back "Permission denied". It
-    // passed on a Mac because podman machine maps differently, which is why
-    // CI runs both runtimes.
-    //
-    // docker has no equivalent and needs none: its daemon runs as root and the
-    // uid in --user is a host uid already.
+    // Rootless podman maps container uids to host subuids, so without keep-id the job cannot
+    // write its bind-mounted workspace. Docker's --user is already a host uid.
     if cli == "podman" {
         a.push("--userns".into());
         a.push("keep-id".into());
     }
     a.extend(network_args(network)?);
 
-    // The image and everything after it belong to the job, never to docker.
-    // Nothing may be appended past this point, which is what the ordering test
-    // pins: an entrypoint of `--privileged` has to stay an argument.
+    // Nothing may be appended past the image: an entrypoint of `--privileged` stays an argument.
     a.push(image.to_string());
     a.push(job.entrypoint.clone());
     a.extend(job.args.iter().cloned());
@@ -173,9 +139,7 @@ fn network_args(network: &Network) -> Result<Vec<String>, ExecError> {
         Network::Open { pins } => {
             let mut a = vec!["--network".into(), "bridge".into()];
             for p in pins {
-                // A name to address pin, nothing more. The resolver stays on,
-                // because turning it off was the thing that made this look
-                // like a boundary while leaving every address reachable.
+                // The resolver stays on: disabling it blocks names, not addresses (#11).
                 a.push("--add-host".into());
                 a.push(format!("{}:{}", p.name, p.addr));
             }
@@ -184,13 +148,8 @@ fn network_args(network: &Network) -> Result<Vec<String>, ExecError> {
     }
 }
 
-/// cordon does not pull images. A job's stderr belongs to the job, and a pull
-/// in the middle of one puts registry progress in it, so `--pull never` is
-/// passed and the operator pulls `CORDON_IMAGE` beforehand.
-///
-/// Checked before the job rather than after, so a missing image is a clear
-/// backend error instead of a container that exits non-zero with runtime text
-/// in its output.
+/// cordon never pulls (`--pull never`), so the operator pulls `CORDON_IMAGE` beforehand.
+/// Checked before the job so a missing image is a backend error, not runtime text in its output.
 async fn image_present(cli: &str, image: &str) -> Result<(), ExecError> {
     let probe = Command::new(cli)
         .args(["image", "inspect", image])
@@ -240,9 +199,7 @@ mod tests {
     use crate::exec::{Backend, Limits};
     use std::path::PathBuf;
 
-    /// Which runtime the live tests use. `CORDON_CONTAINER_CLI=podman cargo
-    /// test` points them at podman, which is what plenty of hosts have instead
-    /// of docker, and is how the host-gateway failure in #11 was found.
+    /// `CORDON_CONTAINER_CLI=podman cargo test` points the live tests at podman.
     fn cli() -> String {
         std::env::var("CORDON_CONTAINER_CLI").unwrap_or_else(|_| "docker".into())
     }
@@ -300,8 +257,7 @@ mod tests {
         }
     }
 
-    /// Issue found by running the suite against podman on Linux: without
-    /// keep-id the job cannot write to its own bind-mounted sandbox.
+    /// Without keep-id a rootless podman job cannot write to its own bind-mounted workspace.
     #[test]
     fn podman_gets_keep_id_and_docker_does_not() {
         let j = job("true");
@@ -327,7 +283,6 @@ mod tests {
         assert!(!doc.contains("--userns"), "{doc}");
     }
 
-    /// The job's stderr is the job's, so the runtime never pulls during one.
     #[test]
     fn the_runtime_never_pulls_during_a_job() {
         assert!(joined(&job("true")).contains("--pull never"));
@@ -366,8 +321,6 @@ mod tests {
         );
     }
 
-    /// An entrypoint or argument that looks like a flag has to stay an argument
-    /// to the job, never a flag to the container runtime.
     #[test]
     fn an_argument_that_looks_like_a_flag_is_not_treated_as_one() {
         let mut j = job("true");
@@ -378,10 +331,7 @@ mod tests {
         assert!(image_at > 0 && args[image_at - 1] != "--privileged");
     }
 
-    /// Issue #11. `open` means open, and the flags say so: a bridge and
-    /// nothing that pretends to filter. The old version added
-    /// `--dns 0.0.0.0`, which blocked name resolution and left every address
-    /// reachable, so it read as a boundary it never was.
+    /// `--dns` must not come back: it blocks names and leaves every address reachable (#11).
     #[test]
     fn open_is_a_bridge_with_no_pretence_of_filtering() {
         let a = args_for(&job("true"), &pins(&[("litellm.internal", "10.0.0.5")])).join(" ");
@@ -410,14 +360,8 @@ mod tests {
         assert!(!a.contains("--add-host"), "{a}");
     }
 
-    /// Review Focus 4. A missing runtime must be a clean BackendUnavailable,
-    /// never a panic and never a silent downgrade to the weaker backend.
-    ///
-    /// Names a runtime that cannot exist rather than emptying PATH. The
-    /// earlier version did the latter, and since tests run in parallel it
-    /// clobbered PATH underneath the two live container tests, which then
-    /// reported the runtime as missing. It only looked harmless because this
-    /// machine had no docker for the probe to find either way.
+    /// Never a panic or a silent downgrade to the weaker backend. Names a runtime that cannot
+    /// exist rather than emptying PATH, which the parallel live container tests also read.
     #[tokio::test]
     async fn a_missing_runtime_is_reported_not_worked_around() {
         let err = Backend::Container {
@@ -465,8 +409,7 @@ mod tests {
         .unwrap();
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
         assert_eq!(out.stdout.trim(), "done");
-        // A shell carries on after a failed redirect, so exit 0 alone does not
-        // mean the write happened. An empty stderr is what proves it.
+        // A shell carries on after a failed redirect, so the empty stderr is what proves it.
         assert_eq!(out.stderr, "", "the job wrote to stderr");
         assert_eq!(
             std::fs::read(ws.join("out.txt"))

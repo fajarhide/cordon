@@ -1,6 +1,4 @@
-//! POST /v1/resolve. The endpoint an agent runtime calls before it touches a
-//! file, and the cheapest way to adopt cordon: no job execution, no container,
-//! just an answer.
+//! POST /v1/resolve. Says where a path lands for an owner, or refuses it, without running a job.
 
 use std::sync::Arc;
 
@@ -42,9 +40,7 @@ pub async fn handler(
     })))
 }
 
-/// Every handler gets its owners here, and it cannot be called without the
-/// scope the auth layer attached, so no endpoint can name an owner the
-/// presented token does not cover.
+/// The only way a handler gets an owner, so none can name one outside the token's scope.
 pub fn owner_or_error(scope: &Scope, segments: &[String]) -> Result<Owner, ApiError> {
     let owner = Owner::parse(segments).map_err(|e| ApiError::bad_request("invalid_owner", e))?;
     if !scope.allows(&owner) {
@@ -56,8 +52,7 @@ pub fn owner_or_error(scope: &Scope, segments: &[String]) -> Result<Owner, ApiEr
     Ok(owner)
 }
 
-/// One place turns a guard refusal into an HTTP answer, so every endpoint
-/// returns the same code for the same refusal.
+/// One mapping, so every endpoint returns the same code for the same refusal.
 pub fn guard_error(e: GuardError, path: &str) -> ApiError {
     let detail = json!({ "path": path });
     match e {

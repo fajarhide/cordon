@@ -1,12 +1,5 @@
-//! Tokens scoped to an owner prefix, so two applications can share one daemon
-//! without trusting each other (issue #17).
-//!
-//! `CORDON_TOKEN` stays what it was: the operator's, and unscoped. It is the
-//! only thing that can issue a scoped token, and a scoped token can name an
-//! owner at or under its prefix and nothing else.
-//!
-//! A scoped token is a record on disk, like an artifact: the token is the file
-//! name and the prefix is the content. Deleting the file revokes it.
+//! Tokens scoped to an owner prefix, so two applications can share one daemon (#17).
+//! A scoped token is a file named for the token, holding its prefix. Deleting it revokes it.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -26,9 +19,7 @@ use crate::owner::Owner;
 
 const SHAPE: &str = "tok_";
 
-/// What the presented credential may name. The auth layer puts one on every
-/// request, and nothing downstream can build an `Owner` from a request or a
-/// `Guard` without handing it over.
+/// What the presented credential may name. No request `Owner` or `Guard` is built without it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scope {
     Operator,
@@ -46,8 +37,7 @@ impl Scope {
 
 /// The scope a presented token carries, if it is one this daemon issued.
 pub fn lookup(root: &Path, presented: &str) -> Option<Scope> {
-    // The shape is checked before the filesystem is, for the same reason an
-    // artifact token's is: the value becomes a file name.
+    // Shape before filesystem: the value becomes a file name.
     if !is_opaque(presented, SHAPE) {
         return None;
     }
@@ -67,8 +57,7 @@ pub async fn handler(
     Extension(scope): Extension<Scope>,
     ApiJson(req): ApiJson<IssueRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    // With no operator token every caller is already unscoped, so a scoped
-    // token would be a promise the daemon does not keep.
+    // With no operator token every caller is unscoped, so a scoped token would narrow nothing.
     if cfg.token.is_none() {
         return Err(ApiError::bad_request(
             "invalid_request",
@@ -116,8 +105,7 @@ mod tests {
 
     const OP: Option<&str> = Some("Bearer s3cret");
 
-    /// Issues a token for `prefix` and returns it as a ready Authorization
-    /// header value.
+    /// Issues a token for `prefix`, as a ready Authorization header value.
     async fn issue(f: &crate::testsupport::Fixture, prefix: &str) -> String {
         let (status, out) =
             post_auth(f, "/v1/token", &format!(r#"{{"prefix":{prefix}}}"#), OP).await;
@@ -175,8 +163,7 @@ mod tests {
                 "/v1/resolve",
                 r#"{"owner":["acme"],"path":"x"}"#,
             ),
-            // A string prefix of the token's own prefix, and one it is a
-            // string prefix of. Neither is inside it.
+            // A string prefix in either direction is not inside the owner prefix.
             (
                 "a shorter lookalike",
                 "/v1/resolve",
@@ -206,9 +193,7 @@ mod tests {
         );
     }
 
-    /// The same shape the guard tests use for a sibling, one level up: with
-    /// inherit a job reads its ancestors' files, and an ancestor above the
-    /// token's prefix belongs to somebody else.
+    /// An ancestor above the token's prefix belongs to somebody else, even with inherit.
     #[tokio::test]
     async fn inherit_stops_at_the_prefix() {
         let f = fixture_with_token("tok-inherit", "s3cret");
@@ -269,8 +254,7 @@ mod tests {
         let f = fixture_with_token("tok-issue", "s3cret");
         let budi = issue(&f, r#"["acme","budi"]"#).await;
 
-        // Not even for its own prefix: a token that can mint tokens cannot be
-        // revoked by deleting one file.
+        // Not even for its own prefix: a token that mints tokens cannot be revoked by one delete.
         for prefix in [r#"["acme"]"#, r#"["acme","budi"]"#] {
             let (status, out) = post_auth(
                 &f,

@@ -1,5 +1,4 @@
-//! POST /v1/run. Runs a job in the owner's workspace and hands back whatever
-//! the job was asked to produce, as tokens rather than paths.
+//! POST /v1/run. Runs a job in the owner's workspace and returns its outputs as tokens, not paths.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,16 +33,13 @@ pub struct RunRequest {
     pub collect: Vec<String>,
     #[serde(default)]
     pub limits: Option<Limits>,
-    /// "none" or "open". Absent means each backend uses what it can actually
-    /// provide, and the response says which.
+    /// "none" or "open". Absent means the backend's own default, and the response says which.
     #[serde(default)]
     pub network: Option<String>,
-    /// Name to address pins, only with "open". A convenience for naming an
-    /// internal service, never a restriction (issue #11).
+    /// Name to address pins, only with "open". A convenience, never a restriction (#11).
     #[serde(default)]
     pub hosts: std::collections::BTreeMap<String, String>,
-    /// Refused on sight. It used to name an allowlist that did not restrict
-    /// anything, so accepting it quietly would carry the old promise forward.
+    /// Refused on sight: it named an allowlist that restricted nothing (#11).
     #[serde(default)]
     pub egress: Option<serde_json::Value>,
     #[serde(default)]
@@ -60,15 +56,12 @@ pub async fn handler(
     let backend = pick_backend(&cfg, req.backend.as_deref())?;
     let network = parse_network(&req)?;
 
-    // The workspace is created first. The guard resolves a path against the
-    // real filesystem, so checking a pattern before the workspace exists
-    // refuses every first-time owner: the parent it would canonicalise is not
-    // there yet.
+    // Created before the collect check: the guard canonicalises against the real filesystem,
+    // so a pattern checked first refuses every first-time owner.
     let workspace = owner.dir(&cfg.root);
     std::fs::create_dir_all(&workspace).map_err(|e| workspace_error(e, &owner))?;
 
-    // Collect patterns are checked before the job runs, so a job never does
-    // work only to be told afterwards that its output was unreachable.
+    // Checked before the job runs, so a job never works for output it cannot collect.
     let guard = Guard::new(&cfg.root, &owner, req.inherit, &scope);
     for pattern in &req.collect {
         check_pattern(&guard, pattern)?;
@@ -100,8 +93,7 @@ pub async fn handler(
     })))
 }
 
-/// A pattern is checked through the guard, with the trailing `*` stripped so
-/// the directory it lives in is what gets judged.
+/// The final segment is stripped, so the directory it lives in is what the guard judges.
 fn check_pattern(guard: &Guard, pattern: &str) -> Result<(), ApiError> {
     if pattern.is_empty() || pattern.starts_with('/') || pattern.contains("..") {
         return Err(ApiError::forbidden(
@@ -120,19 +112,14 @@ fn check_pattern(guard: &Guard, pattern: &str) -> Result<(), ApiError> {
         .map_err(|e| guard_error(e, pattern))
 }
 
-/// A request may lower a limit and may never raise it past the operator's
-/// ceiling. An absent limit takes the ceiling, so a caller cannot get more by
-/// saying less.
+/// A request may lower a limit, never raise it. An absent limit takes the operator's ceiling.
 fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError> {
     let l = asked.unwrap_or(Limits {
         wall_ms: cfg.max_wall_ms,
         memory_mb: cfg.max_memory_mb,
         stdout_kb: 256,
     });
-    // memory_mb == 0 used to pass: the process backend skipped RLIMIT_AS
-    // behind `if memory_bytes > 0` and the container backend emitted
-    // `--memory 0m`, which docker reads as unlimited. Lowering a limit to zero
-    // is not a lower limit, it is no limit (issue #9).
+    // Zero is no limit, not a lower one: docker reads `--memory 0m` as unlimited (#9).
     if l.wall_ms == 0
         || l.memory_mb == 0
         || l.wall_ms > cfg.max_wall_ms
@@ -157,11 +144,7 @@ fn clamp_limits(cfg: &Config, asked: Option<Limits>) -> Result<Limits, ApiError>
     })
 }
 
-/// Reads the network the request asked for.
-///
-/// `egress` is refused rather than translated. It named an allowlist that
-/// blocked name resolution and left every address reachable, so accepting it
-/// quietly would carry that promise into the new shape (issue #11).
+/// `egress` is refused, not translated: it never limited which addresses were reachable (#11).
 fn parse_network(req: &RunRequest) -> Result<Option<Network>, ApiError> {
     if req.egress.is_some() {
         return Err(ApiError::bad_request(
@@ -191,12 +174,7 @@ fn parse_network(req: &RunRequest) -> Result<Option<Network>, ApiError> {
     }
 }
 
-/// The operator's backend is a floor, not a default.
-///
-/// Issue #1b: this was `asked.unwrap_or(&cfg.backend)`, so a deployment
-/// configured for container isolation handed a caller the process backend for
-/// one extra JSON field. Limits already had a ceiling a request could only
-/// lower; isolation needs a floor a request can only raise.
+/// The operator's backend is a floor, not a default: a request can only raise isolation (#1).
 fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> {
     let container = Backend::Container {
         image: cfg.image.clone(),
@@ -221,12 +199,8 @@ fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> 
     }
 }
 
-/// An owner the filesystem cannot hold is the caller's fault, not the daemon's.
-///
-/// Issue #10: both of these came back as 500 `workspace_unavailable`, which put
-/// a bad request in someone's error budget. `AlreadyExists` means a path
-/// component is a file, usually an owner segment that names one; the name
-/// length errors mean the owner is valid to cordon and impossible on disk.
+/// An owner the filesystem cannot hold is the caller's fault: a 400, not a 500 (#10).
+/// That covers a path component that is a file, and a name too long for the disk.
 fn workspace_error(e: std::io::Error, owner: &Owner) -> ApiError {
     use std::io::ErrorKind;
     let is_too_long = e.raw_os_error() == Some(libc::ENAMETOOLONG);
@@ -247,9 +221,7 @@ fn workspace_error(e: std::io::Error, owner: &Owner) -> ApiError {
     )
 }
 
-/// A missing backend is a 503 and never a fallback. The caller asked for
-/// container isolation; handing it the process backend instead would be giving
-/// it less than it asked for without saying so.
+/// A missing backend is a 503, never a silent fallback to weaker isolation.
 fn exec_error(e: ExecError) -> ApiError {
     match e {
         ExecError::Unsupported(m) => ApiError::bad_request("backend_cannot_honour_request", m),
@@ -278,20 +250,15 @@ fn collect(
             if !meta.is_file() {
                 continue;
             }
-            // The job may have written a symlink pointing out of the
-            // workspace. Collecting it would mint a token for someone else's
-            // file, so the resolved target is checked, not the name.
+            // The job may have written a symlink out of the workspace, so judge the target.
             let Ok(real) = std::fs::canonicalize(&path) else {
                 continue;
             };
             if !real.starts_with(&real_ws) {
                 continue;
             }
-            // Issue #6: a hardlink has nothing to resolve, so canonicalize
-            // says it is inside the sandbox while the inode is someone
-            // else's. A file a job just produced has one link; more than one
-            // means it is also reachable under another name, and this is not
-            // the place to work out whose.
+            // canonicalize cannot see a hardlink to another owner's inode (#6).
+            // A file the job just produced has one link, so anything with more is skipped.
             if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
                 continue;
             }
@@ -313,9 +280,8 @@ fn collect(
     Ok(out)
 }
 
-/// A deliberately small glob: a literal path, or one trailing `*` in the final
-/// segment. Taking a glob crate for this, in the code path that decides what a
-/// token gets minted for, is more surface than the feature is worth.
+/// A literal path, or one trailing `*` in the final segment.
+/// Deliberately not a glob crate: this path decides what a token gets minted for.
 fn glob(workspace: &Path, pattern: &str) -> Vec<PathBuf> {
     let (dir, name) = pattern.rsplit_once('/').unwrap_or(("", pattern));
     let base = if dir.is_empty() {
@@ -395,8 +361,6 @@ mod tests {
         }
     }
 
-    /// A job writing a symlink out of its workspace must not get a token for
-    /// what it points at.
     #[tokio::test]
     async fn a_symlink_the_job_wrote_is_not_collected() {
         let f = fixture("run-collect-symlink");
@@ -413,8 +377,7 @@ mod tests {
         );
     }
 
-    /// Issue #6. A hardlink passes the canonicalize check, because there is
-    /// nothing to resolve, so the link count is what catches it.
+    /// A hardlink passes the canonicalize check, so the link count is what catches it (#6).
     #[tokio::test]
     async fn a_hardlink_to_another_owners_file_is_not_collected() {
         let f = fixture("run-hardlink");
@@ -435,14 +398,11 @@ mod tests {
             !paths.contains(&"out/stolen.md"),
             "a hardlink was minted a token: {body}"
         );
-        // The job's own file still comes back, so the check is not just
-        // refusing everything.
+        // The job's own file still comes back, so the check is not refusing everything.
         assert!(paths.contains(&"out/own.txt"), "{body}");
     }
 
-    /// Issue #9. Lowering the memory limit to zero is not a lower limit, it is
-    /// no limit: the process backend skipped RLIMIT_AS and docker read
-    /// `--memory 0m` as unlimited.
+    /// Zero is no limit, not a lower one (#9).
     #[tokio::test]
     async fn a_zero_memory_limit_is_refused() {
         let f = fixture("run-zeromem");
@@ -456,13 +416,11 @@ mod tests {
         assert_eq!(body["error"]["code"], "limit_exceeded", "{body}");
     }
 
-    /// Issue #10. An owner the filesystem cannot hold is a bad request, not a
-    /// broken daemon.
+    /// A bad request, not a broken daemon (#10).
     #[tokio::test]
     async fn an_owner_the_filesystem_cannot_hold_is_a_4xx() {
         let f = fixture("run-badowner-fs");
-        // acme/.workspace exists as a directory; name a file inside the tree
-        // that an owner segment would have to become a directory over.
+        // A file where an owner segment would have to become a directory.
         std::fs::create_dir_all(f.cfg.root.join("owners/acme")).unwrap();
         std::fs::write(f.cfg.root.join("owners/acme/blocked"), b"i am a file").unwrap();
 
@@ -505,8 +463,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    /// Issue #11. The old field is refused rather than translated, so a caller
-    /// still sending it learns the promise changed instead of inheriting it.
+    /// Refused, not translated, so a caller still sending it learns the promise changed (#11).
     #[tokio::test]
     async fn the_old_egress_field_is_refused_on_sight() {
         let f = fixture("run-egress-gone");
@@ -531,8 +488,7 @@ mod tests {
         }
     }
 
-    /// Pins without a network mean nothing, and pins with no network at all are
-    /// a contradiction. Both are refused rather than silently dropped.
+    /// Pins with no network field, or with network none, are refused rather than silently dropped.
     #[tokio::test]
     async fn host_pins_need_an_open_network() {
         let f = fixture("run-pins");
@@ -555,8 +511,6 @@ mod tests {
         assert_eq!(body["error"]["code"], "invalid_request", "{body}");
     }
 
-    /// The response says what the job actually got, so a caller never has to
-    /// infer it from the backend it happened to be given.
     #[tokio::test]
     async fn the_response_reports_the_network_the_job_had() {
         let f = fixture("run-network-report");
@@ -567,13 +521,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        // The process backend shares the host network, so that is what it
-        // reports rather than pretending otherwise.
+        // The process backend shares the host network, and reports that.
         assert_eq!(body["network"], "open", "{body}");
     }
 
-    /// The process backend cannot give a job no network, so asking for it is a
-    /// refusal rather than a quiet grant of the whole host network.
+    /// It cannot isolate the network, so it refuses rather than quietly grant the host's.
     #[tokio::test]
     async fn the_process_backend_refuses_to_promise_no_network() {
         let f = fixture("run-nonet");
@@ -614,9 +566,7 @@ mod tests {
         assert!(owner_dir(&f.cfg.root, &["acme", "brandnew"]).is_dir());
     }
 
-    /// Caught by an end to end run, not by the suite: the collect check used to
-    /// run before the workspace existed, so a first-time owner with any
-    /// pattern containing a directory was always refused.
+    /// The collect check must run after the workspace exists, or a first-time owner is refused.
     #[tokio::test]
     async fn a_brand_new_owner_can_collect_from_a_directory_the_job_creates() {
         let f = fixture("run-newowner-collect");
@@ -633,8 +583,7 @@ mod tests {
         );
     }
 
-    /// Issue #1b. A deployment configured for the container backend must not
-    /// hand out the process backend for one extra JSON field.
+    /// The operator's backend is a floor (#1).
     #[tokio::test]
     async fn a_request_cannot_ask_for_a_weaker_backend_than_the_operator_set() {
         let mut f = fixture("run-floor");
@@ -652,8 +601,6 @@ mod tests {
         assert_eq!(body["error"]["code"], "backend_below_floor", "{body}");
     }
 
-    /// The other direction stays open: a process-configured daemon lets a
-    /// request ask for the stronger backend.
     #[tokio::test]
     async fn a_request_can_ask_for_a_stronger_backend_than_the_operator_set() {
         let f = fixture("run-upgrade");
@@ -663,8 +610,7 @@ mod tests {
             r#"{"owner":["acme","budi"],"entrypoint":"true","backend":"container"}"#,
         )
         .await;
-        // Either it runs, or docker is absent and it says so. What it must not
-        // be is a 400 refusing the upgrade.
+        // Either it runs or docker is absent. It must not be a 400 refusing the upgrade.
         assert!(
             status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE,
             "{status}: {body}"

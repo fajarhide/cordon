@@ -1,19 +1,14 @@
 # frozen_string_literal: true
 
-# The cordon client. It builds requests and reads answers, and holds no rule of
-# its own: a rule implemented twice is a rule that drifts, so every decision
-# about what a path means belongs to the daemon.
-#
-# Apache 2.0, unlike the AGPL daemon, so linking this into a closed source
-# application is fine.
+# Builds requests and reads answers. Every rule lives in the daemon, so it cannot drift.
+# Apache 2.0, unlike the AGPL daemon.
 
 require "json"
 require "net/http"
 require "uri"
 
 module Cordon
-  # Every refusal, with the daemon's stable code so a caller branches on that
-  # rather than on the message.
+  # Carries the daemon's stable code, so a caller branches on that and not on the message.
   class Error < StandardError
     attr_reader :code, :status
 
@@ -25,8 +20,7 @@ module Cordon
   end
 
   class Client
-    # transport is anything that answers call(method, url, headers, body) with
-    # [status, body]. It exists so a test does not need a socket.
+    # transport answers call(method, url, headers, body) with [status, body]. Tests inject one.
     def initialize(base, token: nil, transport: nil)
       @base = base
       @token = token
@@ -48,9 +42,7 @@ module Cordon
       post("/v1/fork", from: from, to: to)
     end
 
-    # The owner is required. A token alone is not enough, deliberately: it is
-    # bound to one owner on the daemon and omitting the owner used to skip the
-    # check rather than fail it.
+    # The owner is required: a token is bound to one owner on the daemon (#8).
     def artifact(token, owner)
       q = URI.encode_www_form_component(owner.join("/"))
       status, body = @transport.call(:get, "#{@base}/v1/artifact/#{token}?owner=#{q}", headers, nil)
@@ -64,8 +56,7 @@ module Cordon
     def post(path, payload)
       status, body = @transport.call(:post, @base + path, headers, JSON.generate(payload))
 
-      # A gateway in front of the daemon can answer with HTML, so the body is
-      # never assumed to be JSON.
+      # A gateway in front of the daemon can answer with HTML, so the body may not be JSON.
       parsed = begin
         JSON.parse(body.to_s)
       rescue JSON::ParserError

@@ -34,8 +34,7 @@ EDGES = [("acme", "acme/legal"), ("acme", "acme/finance"),
          ("acme/legal", "acme/legal/budi"), ("acme/legal", "acme/legal/ani")]
 JOB = "acme/legal/budi"
 
-# start second, the path the job asks for, the owners it passes through, and
-# the code it is refused with. None means it is allowed.
+# start second, path asked for, owners passed through, refusal code (None is allowed)
 REQUESTS = [
     (0.5, "draft.md", [JOB], None),
     (2.8, "../template.docx", [JOB, "acme/legal"], None),
@@ -80,7 +79,7 @@ def frame(i: int) -> str:
                   f'<tspan fill="{GREEN}" font-weight="bold">Never sideways.</tspan>',
                   SUBT, 17, "middle"))
 
-    # What has been decided so far. A verdict stays on screen once given.
+    # A verdict stays on screen once given.
     verdict = {}
     current = None
     for n, (start, path, route, code) in enumerate(REQUESTS):
@@ -103,8 +102,7 @@ def frame(i: int) -> str:
         if owner in verdict:
             colour = RED if verdict[owner] else GREEN
         x, y = cx - NODE_W / 2, cy - NODE_H / 2
-        # A parent lends the file, not its sandbox, so only a refusal or the
-        # job's own sandbox colours the whole box.
+        # A parent lends the file, not its sandbox, so only the file lights up.
         edge = GREEN if owner == JOB else RED if colour == RED else LINE
         s.append(rect(x, y, NODE_W, NODE_H, edge, lw=1.5 if edge == LINE else 2.5, rx=12))
         s.append(label(cx, cy - 8, owner, TEXT, 15, "middle", weight="bold"))
@@ -113,7 +111,6 @@ def frame(i: int) -> str:
     jx, jy = NODES[JOB][0]
     s.append(sans(jx, jy + NODE_H / 2 + 22, "the job runs here", GREEN, 14, "middle", "bold"))
 
-    # The request in flight, and what the daemon said about it.
     if current is not None:
         start, path, route, code = REQUESTS[current]
         u = t - start

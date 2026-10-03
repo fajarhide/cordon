@@ -1,9 +1,5 @@
-//! POST /v1/fork. Gives a new owner a copy of an existing workspace, which is
-//! how a team template becomes a member's starting point and how a reproducible
-//! run gets its inputs.
-//!
-//! It copies bytes. A reflink or a filesystem snapshot would be cheaper and is
-//! the obvious v2 item; v1 does the boring thing that works everywhere.
+//! POST /v1/fork. Gives a new owner a copy of an existing workspace.
+//! Copies bytes: a reflink or snapshot would be cheaper but does not work everywhere.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,8 +42,7 @@ pub async fn handler(
             format!("owner {from} has no workspace"),
         ));
     }
-    // Overwriting someone's workspace silently is worse than refusing, and this
-    // also catches a fork onto itself.
+    // Refuse rather than overwrite. This also catches a fork onto itself.
     if dst.exists() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -57,8 +52,7 @@ pub async fn handler(
     }
 
     let skipped = copy_tree(&src, &dst).map_err(|e| {
-        // A half copied destination is worse than none: it looks like a
-        // finished fork to the next caller.
+        // A half copied destination looks like a finished fork to the next caller.
         let _ = std::fs::remove_dir_all(&dst);
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -72,11 +66,8 @@ pub async fn handler(
     ))
 }
 
-/// Copies a directory tree, returning how many symlinks were left behind.
-///
-/// A symlink is never followed and never recreated. Following it copies someone
-/// else's bytes into the new workspace; recreating it carries a path that means
-/// something different, or nothing, once it sits under a different owner.
+/// Returns how many symlinks were skipped. A symlink is never followed (that copies someone
+/// else's bytes) and never recreated (its path means something else under a new owner).
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
     let mut skipped = 0u64;
     std::fs::create_dir_all(dst)?;
@@ -91,8 +82,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &target)?;
         }
-        // Anything else (a socket, a fifo, a device) is not something a
-        // workspace should carry across an owner boundary.
+        // Sockets, fifos and devices do not cross an owner boundary.
     }
     Ok(skipped)
 }
@@ -188,10 +178,7 @@ mod tests {
         assert_eq!(body["skipped_links"], 1, "{body}");
     }
 
-    /// Issue #7, the part of it that was a real amplification. Forking a
-    /// parent owner used to carry every descendant owner with it, because
-    /// copy_tree recursed over a directory that contained them. The workspace
-    /// leaf from #2 means a parent's source is now its own files only.
+    /// A parent's source is its own workspace leaf, never its descendant owners (#7).
     #[tokio::test]
     async fn forking_a_parent_does_not_carry_its_descendants() {
         let f = fixture("fork-parent");

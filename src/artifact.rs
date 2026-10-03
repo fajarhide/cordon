@@ -1,8 +1,5 @@
-//! Artifacts are addressed by an opaque token, never by a path.
-//!
-//! A token carries no path and no owner inside it, so a caller cannot build
-//! another owner's token by guessing a filename. The binding lives in a record
-//! the daemon writes and the daemon alone reads.
+//! Artifacts are addressed by an opaque token that carries no path and no owner.
+//! The binding lives in a record only the daemon reads, so a filename gives a caller nothing.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,10 +18,7 @@ use crate::token::Scope;
 
 #[derive(Deserialize)]
 pub struct ArtifactQuery {
-    /// Required. Issue #8: this was an Option, so omitting it skipped the owner
-    /// check entirely and a token became a pure bearer credential. Naming the
-    /// wrong owner was refused while naming none was not, which made the
-    /// stricter call the one that failed.
+    /// Required: an absent owner must be refused, not treated as a skipped check (#8).
     pub owner: Option<String>,
 }
 
@@ -40,9 +34,8 @@ pub fn mint(cfg: &Config, owner: &Owner, path: &Path) -> std::io::Result<String>
         .unwrap_or(Duration::ZERO)
         .as_secs();
 
-    // A tab separated record. A serialiser dependency for three fields only
-    // this file reads is not a trade worth making, and neither field can carry
-    // a tab: the owner allowlist forbids it, and the path came out of the guard.
+    // Tab separated, to avoid a serialiser dependency for three fields.
+    // Neither can carry a tab: the owner allowlist forbids it, the path came out of the guard.
     let record = format!("{}\t{}\t{}\n", owner, path.display(), expires);
     std::fs::write(dir.join(format!("{token}.rec")), record)?;
     Ok(token)
@@ -54,8 +47,7 @@ pub async fn handler(
     UrlPath(token): UrlPath<String>,
     Query(q): Query<ArtifactQuery>,
 ) -> Result<Response, ApiError> {
-    // One refusal for every failure below, so the answer never reveals whether
-    // the token existed, belonged to someone else, or had expired.
+    // One refusal for every failure, so the answer never reveals whether the token exists.
     let gone = || {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -74,15 +66,12 @@ pub async fn handler(
     if now_secs() >= expires {
         return Err(gone());
     }
-    // Required, and compared against the record. Absent is a refusal, not a
-    // skip.
+    // Absent is a refusal, not a skip (#8).
     match q.owner.as_deref() {
         Some(asked) if asked == owner => {}
         _ => return Err(gone()),
     }
-    // And the owner has to be one this credential may name. The record's
-    // owner was valid when it was minted, so one that no longer parses is
-    // refused like everything else here.
+    // The owner must also be inside this credential's scope.
     let segments: Vec<String> = owner.split('/').map(str::to_string).collect();
     if !Owner::parse(&segments).is_ok_and(|o| scope.allows(&o)) {
         return Err(gone());
@@ -106,16 +95,11 @@ pub async fn handler(
         .into_response())
 }
 
-/// Deletes the records of expired tokens and returns how many went.
-///
-/// The handler already refuses an expired token, so this is housekeeping and
-/// not a check (issue #18). A record that does not parse is left alone: `mint`
-/// creates the file and then fills it, so an empty one may be a token that is
-/// about to exist.
+/// Deletes expired records and returns how many went. Housekeeping, not a check (#18).
+/// An unparseable record is left alone: `mint` creates the file before filling it.
 pub fn reap(root: &Path) -> usize {
     let now = now_secs();
-    // now_secs answers MAX when the clock is unreadable. That is the right
-    // answer for refusing a fetch and the wrong one for deleting every record.
+    // MAX means the clock is unreadable: right for refusing a fetch, wrong for deleting records.
     if now == u64::MAX {
         return 0;
     }
@@ -143,9 +127,8 @@ pub fn opaque(prefix: &str) -> std::io::Result<String> {
     Ok(format!("{prefix}{}", hex(&raw)))
 }
 
-/// `prefix` and exactly 32 lowercase hex characters. Checking the shape before
-/// touching the filesystem is what stops `art_../../etc/passwd` from becoming
-/// a filename.
+/// `prefix` and exactly 32 lowercase hex characters.
+/// Checked before the filesystem, so `art_../../etc/passwd` never becomes a filename.
 pub fn is_opaque(t: &str, prefix: &str) -> bool {
     t.strip_prefix(prefix).is_some_and(|rest| {
         rest.len() == 32
@@ -194,8 +177,7 @@ mod tests {
         assert_eq!(body, b"mine");
     }
 
-    /// Issue #8. The owner is required, so omitting it cannot be the way past
-    /// the check.
+    /// Omitting the owner cannot be the way past the check (#8).
     #[tokio::test]
     async fn a_fetch_without_an_owner_is_refused() {
         let f = fixture("art-noowner");
@@ -206,8 +188,7 @@ mod tests {
         let (wrong, wrong_body) = get(&f, &format!("/v1/artifact/{token}?owner=acme/ani")).await;
 
         assert_eq!(bare, StatusCode::NOT_FOUND, "a bare fetch succeeded");
-        // And it looks the same as the wrong owner, so the laxer call is not
-        // the more informative one.
+        // Same answer as the wrong owner, so the laxer call is not the more informative one.
         assert_eq!(bare, wrong);
         assert_eq!(bare_body, wrong_body);
     }
@@ -250,14 +231,12 @@ mod tests {
         Arc::get_mut(&mut f.cfg).expect("sole owner").artifact_ttl = Duration::from_secs(0);
         let file = budi().dir(&f.cfg.root).join("notes.md");
         let token = mint(&f.cfg, &budi(), &file).unwrap();
-        // With the right owner. Without one this was refused for the missing
-        // owner and passed whether or not expiry was checked at all.
+        // With the right owner, or the missing owner refuses it before expiry is ever checked.
         let (status, _) = get(&f, &format!("/v1/artifact/{token}?owner=acme/budi")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    /// Issue #18. Refusing an expired token and deleting its record are two
-    /// things, and only the first one used to happen.
+    /// Refusing an expired token does not delete its record; reap does (#18).
     #[tokio::test]
     async fn reap_deletes_expired_records_and_nothing_else() {
         let mut f = fixture("art-reap");
@@ -286,9 +265,7 @@ mod tests {
         assert_eq!(reap(&f.cfg.root), 0, "a second sweep found something");
     }
 
-    /// Review Focus 5. A valid token and the wrong owner must be refused, and
-    /// the body must be identical to an unknown token so the answer does not
-    /// confirm that the token exists.
+    /// The refusal must match an unknown token's, so it does not confirm the token exists.
     #[tokio::test]
     async fn another_owner_cannot_open_it_and_cannot_tell_it_exists() {
         let f = fixture("art-wrong-owner");

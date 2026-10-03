@@ -1,11 +1,5 @@
-//! Answers one question: may this owner touch this path.
-//!
-//! Every answer resolves the path on the filesystem first and checks the
-//! resolved result. Checking the string instead is defeated by a symlink, so
-//! the string is never the subject of the decision.
-//!
-//! Nothing here is cached. A job can plant a symlink between two calls, so a
-//! verdict is only true for the instant it was computed.
+//! May this owner touch this path. Resolved on disk first: a symlink defeats a string check.
+//! Nothing is cached: a job can plant a symlink between two calls.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -36,9 +30,7 @@ pub struct Guard {
 }
 
 impl Guard {
-    /// The scope is not optional. `inherit` lends an ancestor's files, and an
-    /// ancestor above a scoped token's prefix belongs to another caller, so a
-    /// guard built without one would be the way around the token (issue #17).
+    /// Scope is required: without it `inherit` reaches above a scoped token's prefix (#17).
     pub fn new(root: &Path, owner: &Owner, inherit: bool, scope: &Scope) -> Self {
         Guard {
             root: root.to_path_buf(),
@@ -48,13 +40,8 @@ impl Guard {
         }
     }
 
-    /// Returns the real, canonicalised location of `rel`, or refuses.
-    ///
-    /// The returned path is the one that was checked, not the one that was
-    /// asked for. Handing back the requested spelling lets a caller open a
-    /// name whose meaning changed after the answer (issue #5). It is still not
-    /// a capability: a component created between this answer and the open is
-    /// outside what any path string can promise.
+    /// Returns the canonical path that was checked, not the requested spelling (#5).
+    /// Not a capability: a component created between this answer and the open is not covered.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf, GuardError> {
         if rel.is_empty() {
             return Err(GuardError::Escapes("<empty>".into()));
@@ -62,9 +49,7 @@ impl Guard {
         if rel.starts_with('/') || Path::new(rel).is_absolute() {
             return Err(GuardError::Absolute(rel.into()));
         }
-        // None of these are path syntax here. A caller sending one is either
-        // confused about the interface or probing it, and both earn a refusal
-        // rather than a best effort interpretation.
+        // None of these are path syntax here, so refuse instead of interpreting them.
         if rel.contains('\0') || rel.contains('%') || rel.contains('\\') {
             return Err(GuardError::Escapes(rel.into()));
         }
@@ -84,8 +69,7 @@ impl Guard {
             if !self.scope.allows(a) {
                 return Err(GuardError::Escapes(rel.into()));
             }
-            // An ancestor lends its own files, never a directory under them.
-            // One component only, so there is no subtree to walk.
+            // An ancestor lends its own files only, never a directory under them.
             if tail.len() != 1 {
                 return Err(GuardError::Escapes(rel.into()));
             }
@@ -96,8 +80,7 @@ impl Guard {
         let real = resolve_existing(&joined).ok_or_else(|| GuardError::Escapes(rel.into()))?;
 
         let allowed = if ancestor {
-            // Directly inside the ancestor's own workspace, and a file. A
-            // directory there could be anything, including a future owner.
+            // A file directly in the ancestor's workspace: a directory could be a future owner.
             real.parent() == Some(canonical_or_literal(&base).as_path()) && !real.is_dir()
         } else {
             let own = canonical_or_literal(&base);
@@ -110,13 +93,8 @@ impl Guard {
     }
 }
 
-/// Splits a request path into ancestor hops and the remaining components.
-///
-/// `..` is a step up the ownership tree, not a filesystem traversal, so it is
-/// only meaningful as a prefix. A `..` after any other component, a `.`
-/// anywhere, and an empty component are all refused rather than normalised,
-/// which removes the entire class of hidden-parent tricks instead of trying to
-/// out-guess them.
+/// `..` is a step up the ownership tree, not a traversal, so it is only valid as a prefix.
+/// A later `..`, any `.` and an empty component are refused, never normalised.
 fn split_hops(rel: &str) -> Option<(usize, Vec<&str>)> {
     let mut hops = 0usize;
     let mut tail: Vec<&str> = Vec::new();
@@ -133,25 +111,19 @@ fn split_hops(rel: &str) -> Option<(usize, Vec<&str>)> {
     Some((hops, tail))
 }
 
-/// Canonicalises if the directory is there, falls back to the literal path if
-/// it is not. A workspace that does not exist yet has no symlinks to resolve,
-/// and the containment check still holds against the literal form.
+/// A workspace that does not exist yet has no symlinks, so its literal path is safe to check.
 fn canonical_or_literal(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Resolves as far as the filesystem allows. A path that does not exist yet
-/// still has to have a real, canonicalised parent inside the workspace, which
-/// is what lets a job create a file without opening a hole.
+/// A path that does not exist yet resolves through its real parent, so a job can create a file.
 fn resolve_existing(p: &Path) -> Option<PathBuf> {
     if let Ok(real) = std::fs::canonicalize(p) {
         return Some(real);
     }
     let parent = p.parent()?;
     let name = p.file_name()?;
-    // A trailing `..` or `.` has no usable file name, and a parent that is
-    // itself missing is refused rather than walked further up, so a job cannot
-    // reach an ancestor by naming enough nonexistent directories.
+    // A missing parent is refused, not walked up, or made-up directories would reach an ancestor.
     if matches!(
         Path::new(name).components().next(),
         Some(Component::ParentDir) | Some(Component::CurDir)
@@ -167,8 +139,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// A temp directory that cleans itself up, so the suite does not take a
-    /// dependency on tempfile for four lines of work.
+    /// Self-cleaning temp directory, to avoid a tempfile dependency.
     struct TempRoot(PathBuf);
     impl TempRoot {
         fn new(tag: &str) -> Self {
@@ -213,13 +184,11 @@ mod tests {
     #[test]
     fn refuses_every_way_out_of_the_workspace() {
         let f = fixture("escape");
-        // A symlink inside Budi's workspace pointing at Ani's file.
         std::os::unix::fs::symlink(
             f.ani.dir(&f.root).join("secret.md"),
             f.budi.dir(&f.root).join("peek"),
         )
         .unwrap();
-        // A symlink pointing clean out of the root.
         std::os::unix::fs::symlink("/etc/passwd", f.budi.dir(&f.root).join("passwd")).unwrap();
         // A symlinked directory, so the escape is in a path segment not the leaf.
         std::os::unix::fs::symlink(f.ani.dir(&f.root), f.budi.dir(&f.root).join("hers")).unwrap();
@@ -252,15 +221,13 @@ mod tests {
     fn allows_the_owners_own_files() {
         let f = fixture("own");
         let g = Guard::new(&f.root, &f.budi, false, &Scope::Operator);
-        // Issue #5: the answer is the canonicalised path that was checked, not
-        // the spelling that was asked for.
+        // The answer is the canonical path that was checked, not the requested spelling (#5).
         let want = fs::canonicalize(f.budi.dir(&f.root))
             .unwrap()
             .join("notes.md");
         assert_eq!(g.resolve("notes.md").unwrap(), want);
         // A file that does not exist yet still resolves, so a job can create it.
         assert!(g.resolve("out.txt").is_ok());
-        // A nested path under a real directory resolves.
         fs::create_dir(f.budi.dir(&f.root).join("sub")).unwrap();
         assert!(g.resolve("sub/deep.txt").is_ok());
     }
@@ -294,8 +261,7 @@ mod tests {
         );
     }
 
-    /// Issue #17. A scoped token lends the ancestors inside its prefix and
-    /// none above it, which belong to whoever holds the wider token.
+    /// A scoped token lends the ancestors inside its prefix and none above it (#17).
     #[test]
     fn inherit_stops_at_the_scope() {
         let f = fixture("inherit-scope");
@@ -324,9 +290,7 @@ mod tests {
         );
     }
 
-    /// An ancestor grant stops at the ancestor's own files. Every directory
-    /// under an ancestor is, or could become, another owner, so the subtree is
-    /// closed rather than filtered.
+    /// Any directory under an ancestor could become another owner, so the subtree is closed.
     #[test]
     fn inherit_does_not_open_an_ancestors_subtree() {
         let f = fixture("inherit-subtree");
@@ -335,13 +299,11 @@ mod tests {
         fs::write(legal.join("shared/template.md"), b"tmpl").unwrap();
 
         let g = Guard::new(&f.root, &f.budi, true, &Scope::Operator);
-        // A plain subdirectory of the ancestor is closed, the same as a
-        // sibling workspace, because the guard cannot tell them apart.
+        // The guard cannot tell a plain subdirectory from a sibling workspace, so both are closed.
         assert!(
             g.resolve("../shared/template.md").is_err(),
             "an ancestor subtree was reachable, so a sibling workspace is too"
         );
-        // The sibling directory itself is not resolvable either.
         assert!(g.resolve("../ani").is_err(), "a sibling directory resolved");
     }
 
@@ -364,16 +326,13 @@ mod tests {
         assert!(matches!(err, GuardError::Absolute(_)), "got {err:?}");
     }
 
-    /// Review Focus 2. The guard answers at call time. A job can write a
-    /// symlink and read through it on a later call, so a verdict must never be
-    /// cached and the resolution must happen again every time.
+    /// A job can plant a symlink between calls, so every call must resolve again.
     #[test]
     fn a_symlink_planted_after_the_guard_was_built_is_still_refused() {
         let f = fixture("planted");
         let g = Guard::new(&f.root, &f.budi, false, &Scope::Operator);
 
-        // First call: the path does not exist, but its parent does, so it
-        // resolves. This is what lets a job create a new file.
+        // A missing path with a real parent resolves, which lets a job create a file.
         assert!(g.resolve("later").is_ok());
 
         // The job now plants a symlink at exactly that name.
@@ -389,11 +348,8 @@ mod tests {
         );
     }
 
-    /// Issue #2. An owner must not read its descendant owners' bytes.
-    ///
-    /// Asserted on content, not on an error. A parent asking for `legal` gets a
-    /// creatable path inside its own workspace, which is legitimate; what must
-    /// never happen is that path handing back the child's file.
+    /// An owner must not read its descendant owners' bytes (#2).
+    /// Asserted on content: a parent may create its own `legal`, but never read the child's file.
     #[test]
     fn a_parent_owner_cannot_read_its_childrens_bytes() {
         let f = fixture("parent-child");
@@ -440,9 +396,7 @@ mod tests {
         }
     }
 
-    /// `..` is an ownership step, so it only means anything as a prefix.
-    /// Everything else is refused rather than normalised, which removes the
-    /// hidden-parent class instead of trying to out-guess it.
+    /// `..` is only valid as a prefix. Anywhere else it is refused, never normalised.
     #[test]
     fn a_parent_step_is_refused_anywhere_but_the_front() {
         let f = fixture("hops");

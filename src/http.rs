@@ -59,13 +59,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// A JSON body extractor that refuses in cordon's shape rather than axum's.
-///
-/// axum's own `Json` rejects a missing content type, an unparseable body and a
-/// missing field with plain text and three different statuses. The contract
-/// says every refusal is a 4xx carrying a stable `code`, and a client that
-/// branches on `error.code` got a parse failure instead. Found while recording
-/// a demo, which is its own small lesson about who reads the error path.
+/// Refuses in cordon's shape: axum's `Json` rejects with plain text and no stable `code`.
 pub struct ApiJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for ApiJson<T>
@@ -78,8 +72,7 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(v)) => Ok(ApiJson(v)),
-            // One code for every shape problem, because from a caller's side
-            // they are one problem: the body is not what the endpoint takes.
+            // One code for every shape problem: to a caller they are all a wrong body.
             Err(e) => Err(ApiError::bad_request(
                 "invalid_request",
                 rejection_message(&e),
@@ -98,8 +91,7 @@ fn rejection_message(e: &JsonRejection) -> String {
 }
 
 pub fn router(cfg: Arc<Config>) -> Router {
-    // Health is deliberately outside the token check: an operator's probe
-    // should not need the secret, and it reveals nothing but liveness.
+    // Health is outside the token check: a probe should not need the secret.
     let open = Router::new().route(
         "/v1/health",
         get(|| async { Json(json!({ "status": "ok" })) }),
@@ -120,20 +112,8 @@ pub fn router(cfg: Arc<Config>) -> Router {
     open.merge(guarded)
 }
 
-/// Checks the bearer token on every endpoint that can name an owner.
-///
-/// Issue #3: this did not exist. CORDON_TOKEN was read at startup, used to
-/// decide whether the daemon was allowed to listen on a public address, and
-/// then never looked at again, while the TypeScript client dutifully sent the
-/// header. Setting a token bought nothing at all.
-///
-/// With no token configured every request is allowed, which is the unix socket
-/// and loopback case. Config::from_env is what refuses to start a reachable
-/// listener in that state.
-///
-/// It also decides what the credential may name, and attaches that to the
-/// request as a `Scope`. Every handler extracts it, so a route added outside
-/// this layer fails on the missing extension instead of running unscoped.
+/// With no token every request is allowed; `Config::from_env` refuses a public listener then (#3).
+/// Attaches the `Scope` every handler extracts, so a route added outside this layer fails.
 async fn require_token(
     State(cfg): State<Arc<Config>>,
     mut req: Request,
@@ -171,10 +151,7 @@ fn bearer_value(value: &str) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then_some(rest.trim())
 }
 
-/// Compares without an early exit on the first differing byte.
-///
-/// The length difference is observable, which is fine for an operator chosen
-/// shared secret and is part of why this is a token rather than a password.
+/// No early exit on the first differing byte. The length is observable, fine for a shared secret.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -204,8 +181,7 @@ mod tests {
             artifact_ttl: std::time::Duration::from_secs(60),
             max_wall_ms: 5_000,
             max_memory_mb: 128,
-            // See the note in the exec tests: the boundary exists on Linux only,
-            // so the suite enforces it there and runs without it elsewhere.
+            // The boundary exists on Linux only, so the suite runs without it elsewhere.
             unsafe_process_backend: cfg!(not(target_os = "linux")),
         })
     }
@@ -226,8 +202,7 @@ mod tests {
         assert_eq!(&body[..], br#"{"status":"ok"}"#);
     }
 
-    /// Issue #3. A token that is configured has to be checked, on every
-    /// endpoint that can name an owner.
+    /// A configured token is checked on every endpoint that can name an owner (#3).
     #[tokio::test]
     async fn a_configured_token_is_required() {
         let f = crate::testsupport::fixture_with_token("auth", "s3cret");
@@ -285,8 +260,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "/v1/artifact was open");
     }
 
-    /// Every refusal is a 4xx carrying a code, including the ones axum would
-    /// otherwise answer with plain text and three different statuses.
+    /// Covers the cases axum would otherwise answer with plain text and its own statuses.
     #[tokio::test]
     async fn a_malformed_body_refuses_in_cordons_shape() {
         use crate::testsupport::{fixture, post_typed};
@@ -325,7 +299,6 @@ mod tests {
         }
     }
 
-    /// Health stays open so an operator's probe does not need the secret.
     #[tokio::test]
     async fn health_does_not_need_the_token() {
         let f = crate::testsupport::fixture_with_token("auth-health", "s3cret");
