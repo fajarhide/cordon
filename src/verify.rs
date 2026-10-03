@@ -271,16 +271,20 @@ async fn data_plane_checks(c: &Client) -> Result<Vec<Check>, String> {
         r#"{{"owner":{OWNER_B},"entrypoint":"sh","args":["-c","printf {SECRET} > secret.md"],
              "limits":{{"wall_ms":10000,"memory_mb":128,"stdout_kb":16}}}}"#
     );
+    // These two are refused before any job runs, so they do not need the seed
+    // and must not be skipped when it fails. An earlier version gated every
+    // check on the seed, which hid both of them behind a missing image.
+    let mut out = vec![floor_check(c).await?, zero_memory_check(c).await?];
+
     let (status, raw) = c.post("/v1/run", &seed).await?;
     if status != 200 {
         let why = format!(
             "/v1/run answered {status} ({}), so the data plane could not be exercised",
             json_string(&raw, "code").unwrap_or_else(|| "no code".into())
         );
-        return Ok(names.iter().map(|n| Check::skip(n, why.clone())).collect());
+        out.extend(names[..4].iter().map(|n| Check::skip(n, why.clone())));
+        return Ok(out);
     }
-
-    let mut out = Vec::new();
 
     // Owner a's job goes at it directly, bypassing the path layer entirely,
     // which is exactly what issue #1 was.
@@ -352,31 +356,37 @@ async fn data_plane_checks(c: &Client) -> Result<Vec<Check>, String> {
         }
     }
 
-    // The backend floor only means something on a container-configured daemon.
+    Ok(out)
+}
+
+/// The backend floor only means something on a container-configured daemon.
+/// Refused before any job runs, so it needs no seed.
+async fn floor_check(c: &Client) -> Result<Check, String> {
+    let name = DATA_PLANE_NAMES[4];
     let downgrade = format!(
         r#"{{"owner":{OWNER_A},"entrypoint":"true","backend":"process",
              "limits":{{"wall_ms":5000,"memory_mb":64,"stdout_kb":8}}}}"#
     );
     let (status, raw) = c.post("/v1/run", &downgrade).await?;
-    out.push(match json_string(&raw, "code").as_deref() {
-        Some("backend_below_floor") => {
-            Check::pass(names[4], "status 400, code backend_below_floor")
-        }
-        _ if status == 200 => Check::skip(
-            names[4],
+    Ok(match json_string(&raw, "code").as_deref() {
+        Some("backend_below_floor") => Check::pass(name, "status 400, code backend_below_floor"),
+        Some("unauthorized") => Check::skip(name, "refused for want of a token"),
+        _ if status == 200 || status == 503 => Check::skip(
+            name,
             "this daemon is configured for the process backend, so there is no floor to test",
         ),
-        _ => Check::fail(names[4], format!("status {status}, body {raw}")),
-    });
+        _ => Check::fail(name, format!("status {status}, body {raw}")),
+    })
+}
 
+/// Also refused before any job runs.
+async fn zero_memory_check(c: &Client) -> Result<Check, String> {
     let zero = format!(
         r#"{{"owner":{OWNER_A},"entrypoint":"true",
              "limits":{{"wall_ms":5000,"memory_mb":0,"stdout_kb":8}}}}"#
     );
     let (status, raw) = c.post("/v1/run", &zero).await?;
-    out.push(Check::refused(names[5], status, &raw));
-
-    Ok(out)
+    Ok(Check::refused(DATA_PLANE_NAMES[5], status, &raw))
 }
 
 pub fn report(checks: &[Check], w: &mut impl Write) -> bool {
@@ -552,19 +562,42 @@ mod tests {
         (checks.len() - f - s, f, s)
     }
 
+    /// A daemon that refuses everything cannot have its data plane exercised,
+    /// so those checks must skip rather than pass.
+    ///
+    /// Asserted on the skips rather than on "nothing failed". The blanket 403
+    /// this stub returns is a genuine failure for the backend floor probe,
+    /// which expects a 400 with its own code, and verify is right to say so.
     #[tokio::test]
-    async fn a_daemon_that_refuses_everything_fails_the_data_plane_as_unprovable() {
-        // 403 to every request, including the seed job, so the path checks pass
-        // and the data plane cannot be exercised. It must skip, never pass.
+    async fn a_daemon_that_refuses_everything_cannot_prove_its_data_plane() {
         let addr = serve(
             r#"{"error":{"code":"path_escapes_workspace","message":"no"}}"#,
             403,
         )
         .await;
         let checks = run(&addr, None).await.unwrap();
-        let (_, failed, skipped) = counts(&checks);
-        assert_eq!(failed, 0, "a refusing daemon failed a check");
-        assert!(skipped >= 6, "the data plane was not skipped: {skipped}");
+
+        // The four checks that need a seed job are the ones that must skip.
+        for name in &DATA_PLANE_NAMES[..4] {
+            let c = checks
+                .iter()
+                .find(|c| &c.name == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the run"));
+            assert!(
+                matches!(c.outcome, Outcome::Skip(_)),
+                "{name} did not skip against a daemon that refuses everything"
+            );
+        }
+        // And nothing in the path layer failed, since every one of those is a
+        // refusal carrying a code.
+        for (name, _) in PATH_ATTEMPTS {
+            let c = checks.iter().find(|c| &c.name == name).unwrap();
+            assert!(
+                matches!(c.outcome, Outcome::Pass),
+                "{name} did not pass: {}",
+                c.detail
+            );
+        }
     }
 
     #[tokio::test]
