@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 
 use crate::http::ApiJson;
 use serde::Deserialize;
@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::guard::{Guard, GuardError};
 use crate::http::ApiError;
 use crate::owner::Owner;
+use crate::token::Scope;
 
 #[derive(Deserialize)]
 pub struct ResolveRequest {
@@ -27,10 +28,11 @@ pub struct ResolveRequest {
 
 pub async fn handler(
     State(cfg): State<Arc<Config>>,
+    Extension(scope): Extension<Scope>,
     ApiJson(req): ApiJson<ResolveRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let owner = owner_or_error(&req.owner)?;
-    let resolved = Guard::new(&cfg.root, &owner, req.inherit)
+    let owner = owner_or_error(&scope, &req.owner)?;
+    let resolved = Guard::new(&cfg.root, &owner, req.inherit, &scope)
         .resolve(&req.path)
         .map_err(|e| guard_error(e, &req.path))?;
 
@@ -40,8 +42,18 @@ pub async fn handler(
     })))
 }
 
-pub fn owner_or_error(segments: &[String]) -> Result<Owner, ApiError> {
-    Owner::parse(segments).map_err(|e| ApiError::bad_request("invalid_owner", e))
+/// Every handler gets its owners here, and it cannot be called without the
+/// scope the auth layer attached, so no endpoint can name an owner the
+/// presented token does not cover.
+pub fn owner_or_error(scope: &Scope, segments: &[String]) -> Result<Owner, ApiError> {
+    let owner = Owner::parse(segments).map_err(|e| ApiError::bad_request("invalid_owner", e))?;
+    if !scope.allows(&owner) {
+        return Err(ApiError::forbidden(
+            "owner_outside_token_scope",
+            "this token is scoped to an owner prefix that does not contain that owner",
+        ));
+    }
+    Ok(owner)
 }
 
 /// One place turns a guard refusal into an HTTP answer, so every endpoint

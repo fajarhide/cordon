@@ -239,7 +239,7 @@ real.
 
 ## API
 
-Five endpoints. You can adopt the first one alone and stop there.
+Six endpoints. You can adopt the first one alone and stop there.
 
 | | |
 | --- | --- |
@@ -247,6 +247,7 @@ Five endpoints. You can adopt the first one alone and stop there.
 | `POST /v1/run` | run a job in the owner's sandbox, collect its output |
 | `GET /v1/artifact/{token}` | fetch one collected file by token |
 | `POST /v1/fork` | copy a sandbox to a new owner, never overwriting |
+| `POST /v1/token` | issue a token scoped to an owner prefix, operator only |
 | `GET /v1/health` | liveness |
 
 ### The cheapest way to adopt it
@@ -289,6 +290,30 @@ $ curl -s 'localhost:7777/v1/artifact/art_ca0a49fb851175de1a08cb0dba96ddc2?owner
 {"error":{"code":"artifact_not_found","message":"no such artifact"}}
 ```
 
+### Two applications, one daemon
+
+`CORDON_TOKEN` can name any owner. A scoped token can name the owners at or
+under one prefix, and only the operator token can issue one.
+
+```bash
+$ curl -s -X POST localhost:7777/v1/token -H "authorization: Bearer $CORDON_TOKEN" \
+    -H 'content-type: application/json' -d '{"prefix":["acme"]}'
+{"prefix":"acme","token":"tok_5b0e..."}
+
+$ curl -s -X POST localhost:7777/v1/resolve -H 'authorization: Bearer tok_5b0e...' \
+    -H 'content-type: application/json' -d '{"owner":["other","budi"],"path":"notes.md"}'
+{"error":{"code":"owner_outside_token_scope",
+          "message":"this token is scoped to an owner prefix that does not contain that owner"}}
+```
+
+The scope holds on every endpoint that names an owner. A fork needs both ends
+inside it, an artifact belonging to another prefix answers like one that never
+existed, and `inherit` stops at the prefix instead of reaching the owners above
+it. The prefix is compared a segment at a time, so `acme2` is not inside `acme`.
+
+A token is a file under `CORDON_ROOT/tokens`, mode 600. It does not expire, and
+deleting the file revokes it.
+
 ### Network
 
 ```json
@@ -313,7 +338,9 @@ on prose.
 
 | code | status | |
 | --- | --- | --- |
-| `unauthorized` | 401 | no bearer token, or the wrong one |
+| `unauthorized` | 401 | no bearer token, the wrong one, or a revoked one |
+| `owner_outside_token_scope` | 403 | a scoped token named an owner outside its prefix |
+| `operator_token_required` | 403 | a scoped token tried to issue a token |
 | `invalid_owner` | 400 | a segment the daemon or the filesystem will not take |
 | `absolute_path_rejected` | 400 | paths are relative to the owner workspace |
 | `path_escapes_workspace` | 403 | the path resolved outside it |
@@ -328,8 +355,9 @@ on prose.
 | `destination_exists` | 409 | a fork would overwrite a workspace |
 | `source_not_found` | 404 | the owner being forked has no workspace |
 
-Three codes are 5xx and each one means the daemon rather than the request:
-`workspace_unavailable`, `fork_failed`, `artifact_mint_failed`. A full disk, a
+Four codes are 5xx and each one means the daemon rather than the request:
+`workspace_unavailable`, `fork_failed`, `artifact_mint_failed`,
+`token_issue_failed`. A full disk, a
 read-only filesystem, a permission problem on `CORDON_ROOT`. Nothing a caller
 sends should produce one, and if it does, that is a bug worth an issue.
 
@@ -409,9 +437,10 @@ and exits non-zero if one lands.
 
 It writes a secret as one owner and has another owner's job try to read it, by
 every shape the review used. It checks authentication, the parent-child owner
-pair, the backend floor, and all three ways of asking for an artifact.
+pair, the backend floor, all three ways of asking for an artifact, and a token
+scoped to one owner pointed at everything that is not that owner.
 
-![cordon verify passing 22 checks against a running daemon](assets/verify.gif)
+![cordon verify passing its checks against a running daemon](assets/verify.gif)
 
 <details>
 <summary>The same run as text, from CI on Linux, abridged in the middle</summary>
@@ -436,8 +465,14 @@ ok   an artifact refuses another owner status 404, same body as a bare fetch
 ok   an artifact works for its owner  the owner got its own bytes
 ok   a weaker backend is refused      status 400, code backend_below_floor
 ok   a zero memory limit is refused   status 400, code limit_exceeded
+ok   scoped: its own prefix works     status 200 for its own owner
+ok   scoped: another owner refused    status 403, code owner_outside_token_scope
+ok   scoped: a lookalike refused      status 403, code owner_outside_token_scope
+ok   scoped: no inherit above it      status 403, code path_escapes_workspace
+ok   scoped: no fork across           status 403, code owner_outside_token_scope
+ok   scoped: cannot issue tokens      status 403, code operator_token_required
 
-all 22 checks passed
+all 29 checks passed
 ```
 
 </details>
@@ -485,9 +520,11 @@ given, whatever path the model picked.
 
 So: put the daemon on a unix socket or loopback, keep `CORDON_TOKEN` out of
 anything a user controls, and derive the owner array in your own code rather
-than taking it from a request body. Scoping a token to an owner prefix, so two
-applications can share one daemon without trusting each other, is a real feature
-and is not in v1.
+than taking it from a request body.
+
+Two applications sharing a daemon do not have to trust each other: give each a
+token scoped to its own owner prefix. Inside its prefix an application is still
+trusted to name any owner, exactly as above.
 
 ## What is guaranteed, and what is not
 
@@ -592,7 +629,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 118 tests
+cargo test                                      # 133 tests
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -648,7 +685,7 @@ small.
 
 ## Security
 
-118 tests, and four mutations each confirmed to break the suite.
+133 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the

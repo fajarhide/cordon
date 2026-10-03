@@ -17,6 +17,7 @@ mod sandbox;
 mod style;
 #[cfg(test)]
 mod testsupport;
+mod token;
 mod verify;
 
 use std::sync::Arc;

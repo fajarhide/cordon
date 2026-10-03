@@ -275,19 +275,24 @@ mod tests {
 
     #[test]
     fn the_default_system_paths_never_include_a_root_a_sandbox_could_live_under() {
-        let paths = system_paths();
-        for bad in ["/tmp", "/var", "/home", "/", "/root"] {
-            assert!(
-                !paths.iter().any(|p| p == Path::new(bad)),
-                "{bad} is in the default allowlist, which would expose CORDON_ROOT"
-            );
-        }
-        for needed in ["/usr", "/bin"] {
-            assert!(
-                paths.iter().any(|p| p == Path::new(needed)),
-                "{needed} is missing, so no job could exec anything"
-            );
-        }
+        // Under the same lock as the override test below. Without it this read
+        // the environment while that test had CORDON_SYSTEM_PATHS set, and
+        // failed about one run in six.
+        temp_env(&[], || {
+            let paths = system_paths();
+            for bad in ["/tmp", "/var", "/home", "/", "/root"] {
+                assert!(
+                    !paths.iter().any(|p| p == Path::new(bad)),
+                    "{bad} is in the default allowlist, which would expose CORDON_ROOT"
+                );
+            }
+            for needed in ["/usr", "/bin"] {
+                assert!(
+                    paths.iter().any(|p| p == Path::new(needed)),
+                    "{needed} is missing, so no job could exec anything"
+                );
+            }
+        });
     }
 
     #[test]
