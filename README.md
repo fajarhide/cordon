@@ -435,6 +435,17 @@ A 403 with an empty body does not count as a pass either. A check passes only on
 a 4xx that carries a machine readable code, because a reverse proxy in front of
 a broken daemon returns exactly a bodiless 403.
 
+The probes live under the owner prefix `cordon-verify`, which is reserved for
+them. Nothing in the API deletes an owner, so they stay on disk unless verify is
+told where the daemon keeps its files:
+
+```bash
+cordon verify http://127.0.0.1:7777 $CORDON_TOKEN --root /var/lib/cordon
+```
+
+That removes `owners/cordon-verify` after a passing run and keeps it after a
+failed one, which is the one time you want to look at it.
+
 ## Trust model
 
 Worth stating plainly, because the README used to imply something stronger.
@@ -543,7 +554,7 @@ stronger backend than the operator configured and never a weaker one.
 | `CORDON_BACKEND` | `process` | or `container` |
 | `CORDON_IMAGE` | `alpine:3.20` | the container backend's image |
 | `CORDON_CONTAINER_CLI` | `docker` | or `podman`. Plenty of hosts have one and not the other |
-| `CORDON_ARTIFACT_TTL` | `24h` | `s`, `m`, `h` or `d` |
+| `CORDON_ARTIFACT_TTL` | `24h` | `s`, `m`, `h` or `d`. Expired records are deleted at startup and every hour after |
 | `CORDON_MAX_WALL_MS` | `60000` | ceiling a request may lower, never raise |
 | `CORDON_MAX_MEMORY_MB` | `1024` | same |
 | `CORDON_SYSTEM_PATHS` | `/usr:/bin:/sbin:/lib:/lib64:/etc:/dev/null:/dev/urandom:/dev/zero` | read and execute inside the Landlock boundary. Never add `/tmp` or `/var`: `CORDON_ROOT` usually lives under one |
