@@ -102,7 +102,12 @@ fn split_host(addr: &str) -> Option<&str> {
 /// A deliberately small duration grammar: seconds, minutes, hours, days.
 /// Pulling in a date library to read "24h" is not a trade worth making.
 fn parse_duration(s: &str) -> Result<Duration, String> {
-    let (digits, unit) = s.split_at(s.len().saturating_sub(1));
+    // Split on the last char, not the last byte. `24h\u{20ac}` used to panic
+    // here on a char boundary and take the daemon down at startup with a
+    // backtrace instead of the clear error every other setting produces
+    // (issue #12).
+    let split = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
+    let (digits, unit) = s.split_at(split);
     let n: u64 = digits.parse().map_err(|_| {
         format!("CORDON_ARTIFACT_TTL={s:?} is not a number followed by s, m, h or d")
     })?;
@@ -201,6 +206,16 @@ mod tests {
     fn refuses_an_unknown_backend() {
         with_env(&[("CORDON_BACKEND", "firecracker")], Config::from_env)
             .expect_err("an unknown backend must refuse to start");
+    }
+
+    /// Issue #12. This used to panic on a char boundary and take the daemon
+    /// down at startup with a backtrace rather than an error.
+    #[test]
+    fn a_multibyte_ttl_is_an_error_not_a_panic() {
+        for v in ["24h\u{20ac}", "\u{20ac}", "24\u{65e5}", "\u{1f600}"] {
+            with_env(&[("CORDON_ARTIFACT_TTL", v)], Config::from_env)
+                .expect_err("a multibyte duration must be refused");
+        }
     }
 
     #[test]

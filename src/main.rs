@@ -24,7 +24,8 @@ const USAGE: &str = "\
 cordon gives each owner an isolated workspace and refuses every path out of it.
 
   cordon serve             run the daemon
-  cordon verify [addr]     prove the isolation guarantee against a running daemon
+  cordon verify [addr] [token]
+                           prove the guarantee against a running daemon
   cordon demo              two owners, every escape refused, no daemon needed
 ";
 
@@ -38,7 +39,14 @@ async fn main() -> std::process::ExitCode {
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| "http://127.0.0.1:7777".into());
-            match verify::run(&addr).await {
+            // The token comes from the argument, or the environment, so a
+            // pipeline does not have to put a secret on a command line.
+            let token = args
+                .get(2)
+                .cloned()
+                .or_else(|| std::env::var("CORDON_TOKEN").ok())
+                .filter(|t| !t.is_empty());
+            match verify::run(&addr, token.as_deref()).await {
                 Err(e) => Err(e),
                 Ok(checks) => {
                     if verify::report(&checks, &mut std::io::stdout()) {

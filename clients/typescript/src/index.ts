@@ -72,8 +72,14 @@ export class Cordon {
     return this.post("/v1/fork", { from, to });
   }
 
-  async artifact(token: string): Promise<ArrayBuffer> {
-    const res = await this.fetcher(`${this.base}/v1/artifact/${token}`, {
+  /**
+   * The owner is required. A token alone is not enough, deliberately: it is
+   * bound to one owner on the daemon and omitting the owner used to skip the
+   * check rather than fail it.
+   */
+  async artifact(token: string, owner: string[]): Promise<ArrayBuffer> {
+    const q = encodeURIComponent(owner.join("/"));
+    const res = await this.fetcher(`${this.base}/v1/artifact/${token}?owner=${q}`, {
       headers: this.headers(),
     });
     if (!res.ok) {

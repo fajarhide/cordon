@@ -5,27 +5,17 @@
 cordon gives every user, team and AI agent its own sandbox on disk, and decides
 whether a path the model chose belongs to the session it came from.
 
-> ### The five holes an adversarial review found are closed. Two things are still true.
+> ### Every finding from the adversarial review is closed but one.
 >
-> A review on 3 Oct 2026 broke the isolation claim in five places. All five are
-> fixed and each has a regression test. What changed:
+> A review on 3 Oct 2026 broke the isolation claim in five places and found
+> eight more issues. Thirteen are fixed with a regression test each. The one
+> still open is [#11](https://github.com/fajarhide/cordon/issues/11): the
+> container backend's egress allowlist blocks name resolution and not IP
+> routing, which is not reproduced yet and is understated in the table below.
 >
-> - **`/v1/run` now has a filesystem boundary.** The process backend restricts itself with Landlock before it execs the job, so a job sees its own sandbox and the system paths it needs to start, and nothing else. Linux 5.13 or later. ([#1](https://github.com/fajarhide/cordon/issues/1))
-> - **An owner's files moved into a `.workspace` leaf**, so an owner's directory no longer contains its descendant owners. ([#2](https://github.com/fajarhide/cordon/issues/2))
-> - **`CORDON_TOKEN` is checked on every request** that can name an owner. ([#3](https://github.com/fajarhide/cordon/issues/3))
-> - **Uppercase is refused in an owner segment**, so a case-insensitive filesystem cannot collapse two owners into one. ([#4](https://github.com/fajarhide/cordon/issues/4))
-> - **`/v1/resolve` returns the canonicalised path it checked.** ([#5](https://github.com/fajarhide/cordon/issues/5))
->
-> **On a machine without Landlock the process backend refuses to run a job at
-> all.** That means macOS, and any Linux kernel before 5.13. Use the container
-> backend there, or set `CORDON_UNSAFE_PROCESS_BACKEND=1` on a development box
-> and accept that there is no boundary. The refusal is the point: the old
-> behaviour was to run the job anyway.
->
-> **`cordon verify` is still too weak to trust as a clean bill of health.** It
-> probes `/v1/resolve` with two same-depth owners and nothing else, which is the
-> same blind spot that let #2 survive 85 tests. Seven lower severity findings are
-> also open. See [the open issues](https://github.com/fajarhide/cordon/issues).
+> Read [the closed issues](https://github.com/fajarhide/cordon/issues?q=is%3Aissue+is%3Aclosed)
+> before trusting any of this. Each one carries its own reproducer and what
+> changed.
 
 ## Quick start
 
@@ -310,12 +300,33 @@ process rather than agreed with it.
 `cordon verify` fires path-string attacks at a daemon you are already running
 and exits non-zero if one lands.
 
-**It is not yet a clean bill of health.** It probes `/v1/resolve` with two
-same-depth owners and nothing else: not `/v1/run`, not a parent-child owner
-pair, not authentication, not backend selection. Those are where the five
-critical findings lived, so a green run proves less than it looks like it does.
-Issue [#14](https://github.com/fajarhide/cordon/issues/14) lists the checks it
-needs before it earns the claim.
+It writes a secret as one owner and has another owner's job try to read it, by
+every shape the review used. It checks authentication, the parent-child owner
+pair, the backend floor, and all three ways of asking for an artifact.
+
+```
+$ cordon verify http://127.0.0.1:7777 $CORDON_TOKEN
+
+ok   no credentials refused           status 401, code unauthorized
+ok   a wrong token refused            status 401, code unauthorized
+ok   parent traversal                 status 403, code path_escapes_workspace
+ok   absolute path                    status 400, code absolute_path_rejected
+ok   uppercase owner                  status 400, code invalid_owner
+ok   parent reaches its child         status 403, code path_escapes_workspace
+ok   a job cannot read another owner  the job ran and could not reach it
+ok   an artifact needs its owner      status 404 with no owner
+ok   an artifact refuses another owner status 404, same body as a bare fetch
+ok   a weaker backend is refused      status 400, code backend_below_floor
+
+all 22 checks passed
+```
+
+**A check it cannot run reports as `skip`, never as a pass.** That distinction is
+the point. The first version of this tool passed 9 of 9 against a daemon that
+leaked every owner's file, because it probed `/v1/resolve` with two same-depth
+owners and counted anything 4xx as a win, including the `401` from a daemon it
+had no credentials for. A run where nothing passed now exits non-zero, because a
+pipeline reading exit 0 on an all-skip run is back where it started.
 
 ```
 $ cordon verify http://127.0.0.1:7777
@@ -337,6 +348,27 @@ A 403 with an empty body does not count as a pass. A check passes only on a 4xx
 that carries a machine readable code, because a reverse proxy in front of a
 broken daemon returns exactly a bodiless 403.
 
+## Trust model
+
+Worth stating plainly, because the README used to imply something stronger.
+
+**The calling application is trusted to name any owner.** The token
+authenticates your app, not your end user. A caller that can reach the daemon
+can run a job as `acme/ani` just as easily as `acme/budi`, so `/v1/fork`
+copying any sandbox is not a separate hole: a caller that can `run` as an owner
+can already read that owner's files.
+
+**The boundary cordon enforces is between jobs, not between callers.** Your app
+decides which owner a request belongs to, from its own session or token. cordon
+makes sure the job that then runs cannot step outside the sandbox that owner was
+given, whatever path the model picked.
+
+So: put the daemon on a unix socket or loopback, keep `CORDON_TOKEN` out of
+anything a user controls, and derive the owner array in your own code rather
+than taking it from a request body. Scoping a token to an owner prefix, so two
+applications can share one daemon without trusting each other, is a real feature
+and is not in v1.
+
 ## What is guaranteed, and what is not
 
 The gaps are in the table too. A table of only wins is a table nobody believes.
@@ -344,6 +376,7 @@ The gaps are in the table too. A table of only wins is a table nobody believes.
 | | process backend | container backend |
 | --- | --- | --- |
 | one owner cannot read another's files | yes, Landlock, Linux 5.13+ | yes |
+| a hardlink to another owner's file | not collected, link count checked | cannot cross the mount |
 | symlink out of the sandbox refused | yes | yes |
 | wall clock and output size capped | yes | yes |
 | memory capped | `RLIMIT_AS`, advisory on macOS | yes, cgroup |
@@ -419,7 +452,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 101 tests
+cargo test                                      # 109 tests
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -443,7 +476,7 @@ The budget is 20 MB and it is a test, not a sentence.
 
 ## Security
 
-101 tests, and four mutations each confirmed to break the suite.
+109 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the
