@@ -64,7 +64,7 @@ Then run the daemon:
 cordon serve
 ```
 
-A 1.2 MB static binary, six dependencies, no runtime and no container needed.
+A 1.3 MB static binary, six dependencies, no runtime and no container needed.
 
 ## What is cordon?
 
@@ -276,11 +276,32 @@ A request still sending the old `egress` field is refused with
 `egress_removed` rather than translated, so a caller learns the promise changed
 instead of inheriting it.
 
-Every refusal is a 4xx carrying a stable `code`: `invalid_owner`,
-`absolute_path_rejected`, `path_escapes_workspace`, `limit_exceeded`,
-`backend_cannot_honour_request`, `backend_unavailable`, `backend_below_floor`,
-`artifact_not_found`, `destination_exists`, `source_not_found`,
-`egress_removed`. Only a daemon fault is a 5xx.
+### Error codes
+
+Every refusal carries a stable `code`, so a caller branches on that rather than
+on prose.
+
+| code | status | |
+| --- | --- | --- |
+| `unauthorized` | 401 | no bearer token, or the wrong one |
+| `invalid_owner` | 400 | a segment the daemon or the filesystem will not take |
+| `absolute_path_rejected` | 400 | paths are relative to the owner workspace |
+| `path_escapes_workspace` | 403 | the path resolved outside it |
+| `invalid_request` | 400 | the body, a network value, or a host pin |
+| `limit_exceeded` | 400 | a limit is zero or above the operator's ceiling |
+| `egress_removed` | 400 | the old field, which was never a boundary |
+| `backend_below_floor` | 400 | a request asked for weaker isolation than configured |
+| `backend_cannot_honour_request` | 400 | that backend cannot do what was asked |
+| `spawn_failed` | 400 | the entrypoint could not be started |
+| `backend_unavailable` | 503 | the container runtime is down, or the image is absent |
+| `artifact_not_found` | 404 | unknown token, wrong owner, expired, or no owner given |
+| `destination_exists` | 409 | a fork would overwrite a workspace |
+| `source_not_found` | 404 | the owner being forked has no workspace |
+
+Three codes are 5xx and each one means the daemon rather than the request:
+`workspace_unavailable`, `fork_failed`, `artifact_mint_failed`. A full disk, a
+read-only filesystem, a permission problem on `CORDON_ROOT`. Nothing a caller
+sends should produce one, and if it does, that is a bug worth an issue.
 
 ## Integrating with an agent runtime
 
@@ -362,25 +383,9 @@ owners and counted anything 4xx as a win, including the `401` from a daemon it
 had no credentials for. A run where nothing passed now exits non-zero, because a
 pipeline reading exit 0 on an all-skip run is back where it started.
 
-```
-$ cordon verify http://127.0.0.1:7777
-
-ok   parent traversal         status 403, code path_escapes_workspace
-ok   deep traversal           status 403, code path_escapes_workspace
-ok   absolute path            status 400, code absolute_path_rejected
-ok   percent encoded          status 403, code path_escapes_workspace
-ok   backslash separator      status 403, code path_escapes_workspace
-ok   dotdot owner             status 400, code invalid_owner
-ok   separator in owner       status 400, code invalid_owner
-ok   non ascii owner          status 400, code invalid_owner
-ok   reach the token store    status 403, code path_escapes_workspace
-
-all 9 checks passed
-```
-
-A 403 with an empty body does not count as a pass. A check passes only on a 4xx
-that carries a machine readable code, because a reverse proxy in front of a
-broken daemon returns exactly a bodiless 403.
+A 403 with an empty body does not count as a pass either. A check passes only on
+a 4xx that carries a machine readable code, because a reverse proxy in front of
+a broken daemon returns exactly a bodiless 403.
 
 ## Trust model
 
@@ -506,31 +511,49 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 116 tests
+cargo test                                      # 118 tests
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
-cd clients/typescript && bun test               # 7 tests
+cd clients/typescript && bun test               # 9 tests
+
+# the container backend, against either runtime. CORDON_REQUIRE_DOCKER makes a
+# skipped container test a failure, which is how CI stops coverage lapsing.
+docker pull alpine:3.20 && CORDON_REQUIRE_DOCKER=1 cargo test
+podman pull alpine:3.20 && podman tag docker.io/library/alpine:3.20 alpine:3.20
+CORDON_CONTAINER_CLI=podman CORDON_REQUIRE_DOCKER=1 \
+  cargo test --bin cordon exec::container
 ```
 
-CI runs on a Linux runner with Docker, so the container backend is exercised for
-real on every push: a container job starts, writes to its sandbox, and is
-confirmed to have no network. A container test that skips there fails the build,
-so the coverage cannot quietly lapse.
+CI runs on a Linux runner against **both** runtimes on every push: a container
+job starts, writes to its sandbox, and is confirmed to have no network, under
+docker and under rootless podman. A container test that skips there fails the
+build, so coverage cannot quietly lapse.
+
+Running both is not belt and braces. Three bugs only ever appeared under
+rootless podman: cordon called `docker` unconditionally, the old `host-gateway`
+pin failed the container outright under netavark, and without `--userns keep-id`
+a job could not write to its own sandbox. The last one passes on a Mac, because
+podman machine maps uids differently.
 
 Footprint, measured by `tests/footprint.rs`, which starts the release binary,
-sends it 50 requests and reads its RSS:
+waits for it to answer, sends it 50 requests, checks it is still answering, and
+reads its RSS:
 
 ```
-daemon RSS while serving: 4960 KB
+daemon RSS while serving: 4768 KB
 test result: ok. 1 passed
 ```
 
-The budget is 20 MB and it is a test, not a sentence.
+The budget is 20 MB and it is a test, not a sentence. It also has a floor of 1
+MB, because the first version accepted any reading above zero and once passed on
+a 32 KB reading for a daemon whose real RSS was 2768 KB. A test that carries a
+claim has to fail when it cannot measure, not when the number happens to be
+small.
 
 ## Security
 
-116 tests, and four mutations each confirmed to break the suite.
+118 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the
