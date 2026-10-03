@@ -13,6 +13,7 @@ mod http;
 mod owner;
 mod resolve;
 mod run;
+mod sandbox;
 #[cfg(test)]
 mod testsupport;
 mod verify;

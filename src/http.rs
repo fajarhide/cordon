@@ -154,6 +154,9 @@ mod tests {
             artifact_ttl: std::time::Duration::from_secs(60),
             max_wall_ms: 5_000,
             max_memory_mb: 128,
+            // See the note in the exec tests: the boundary exists on Linux only,
+            // so the suite enforces it there and runs without it elsewhere.
+            unsafe_process_backend: cfg!(not(target_os = "linux")),
         })
     }
 

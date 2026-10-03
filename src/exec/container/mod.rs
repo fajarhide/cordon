@@ -179,6 +179,10 @@ mod tests {
                 stdout_kb: 64,
             },
             egress: vec![],
+            // Linux gets a real boundary from landlock, so CI enforces it.
+            // Everywhere else there is nothing to enforce, so the suite runs
+            // without one and the boundary itself is tested only on Linux.
+            unsafe_process: cfg!(not(target_os = "linux")),
         }
     }
 
