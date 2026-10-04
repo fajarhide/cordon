@@ -171,6 +171,64 @@ jobs:
           echo "daemon RSS while serving: ${rss} KB"
           test "$rss" -lt 20480 || { echo "over the 20 MB budget"; exit 1; }
 
+  # The README's egress recipe, run as written, so it cannot become the next
+  # claim that was never measured (#16).
+  egress:
+    name: The operator egress recipe
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install podman and pull the image for both runtimes
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq podman
+          podman pull -q docker.io/library/alpine:3.20
+          docker pull -q alpine:3.20
+
+      - name: One host for everything the daemon's user sends
+        run: |
+          set -euo pipefail
+          sudo useradd --system cordon
+          reach() { sudo -u cordon nc -z -w 3 "$1" "$2"; }
+          reach 8.8.8.8 53 || { echo "no baseline: 8.8.8.8:53 is unreachable before any rule"; exit 1; }
+          sudo nft -f - <<'EOF'
+          table inet cordon_egress {
+            chain out {
+              type filter hook output priority 0; policy accept;
+              meta skuid "cordon" oifname "lo" accept
+              meta skuid "cordon" ct state established,related accept
+              meta skuid "cordon" ip daddr 1.1.1.1 tcp dport 443 accept
+              meta skuid "cordon" drop
+            }
+          }
+          EOF
+          reach 1.1.1.1 443 || { echo "the allowed host is unreachable"; exit 1; }
+          if reach 8.8.8.8 53; then echo "an address outside the allowlist was reached"; exit 1; fi
+          nc -z -w 3 8.8.8.8 53 || { echo "another user was caught by the rule"; exit 1; }
+          echo "allowed host reached, 8.8.8.8:53 dropped, other users untouched"
+
+      # The runner cannot be put behind the full recipe without cutting the job
+      # off, so this drops one address for its uid and shows the container obeys.
+      - name: Rootless podman traffic leaves as the user that started it
+        run: |
+          set -euo pipefail
+          reach() { podman run --rm --network bridge alpine:3.20 nc -z -w 3 "$1" "$2"; }
+          reach 8.8.8.8 53 || { echo "no baseline: the container cannot reach 8.8.8.8:53"; exit 1; }
+          sudo nft add rule inet cordon_egress out meta skuid "$(id -u)" ip daddr 8.8.8.8 drop
+          reach 1.1.1.1 443 || { echo "an address the rule does not name was dropped"; exit 1; }
+          if reach 8.8.8.8 53; then echo "the uid rule did not apply to the container"; exit 1; fi
+          sudo nft delete table inet cordon_egress
+          echo "a rootless container is filtered by its owner's uid"
+
+      - name: Rootful docker is filtered on the bridge
+        run: |
+          set -euo pipefail
+          reach() { docker run --rm --network bridge alpine:3.20 nc -z -w 3 "$1" "$2"; }
+          reach 8.8.8.8 53 || { echo "no baseline: the container cannot reach 8.8.8.8:53"; exit 1; }
+          sudo iptables -I DOCKER-USER -i docker0 -j DROP
+          sudo iptables -I DOCKER-USER -i docker0 -d 1.1.1.1 -p tcp --dport 443 -j ACCEPT
+          reach 1.1.1.1 443 || { echo "the allowed host is unreachable"; exit 1; }
+          if reach 8.8.8.8 53; then echo "an address outside the allowlist was reached"; exit 1; fi
+          echo "allowed host reached, 8.8.8.8:53 dropped"
+
   client:
     runs-on: ubuntu-24.04
     steps:

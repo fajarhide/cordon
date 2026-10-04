@@ -226,8 +226,8 @@ tree, a memory cap, an output cap that truncates and says so rather than
 buffering a runaway job into the daemon's heap.
 
 **No network, in the container backend.** `--network none` by default. A job that
-needs to reach something names it, host and port, and gets exactly those names
-resolvable and no resolver for anything else.
+asks for `open` gets the host's outbound access, and narrowing that is the host
+firewall's job.
 
 **No root.** The container backend runs the job as the daemon's own uid, never
 as root, and refuses to run at all if cordon itself is root.
@@ -330,6 +330,45 @@ and failed the container outright under rootless podman with netavark.
 A request still sending the old `egress` field is refused with
 `egress_removed` rather than translated, so a caller learns the promise changed
 instead of inheriting it.
+
+### One host and nothing else
+
+cordon does not filter outbound traffic. To let jobs reach one service, an LLM
+gateway say, and nothing else, filter on the host, where the rule applies to
+packets. Run the daemon as its own user, which the systemd unit does, and limit
+what that user can send:
+
+```
+table inet cordon_egress {
+  chain out {
+    type filter hook output priority 0; policy accept;
+    meta skuid "cordon" oifname "lo" accept
+    meta skuid "cordon" ct state established,related accept
+    meta skuid "cordon" ip daddr 10.0.0.5 tcp dport 4000 accept
+    meta skuid "cordon" drop
+  }
+}
+```
+
+Load it with `nft -f`. It covers the process backend, whose jobs run as that
+user, and rootless podman, whose containers reach the network through a process
+that user owns. Rootful docker forwards container traffic instead, so the user
+match never sees it. Filter the bridge:
+
+```bash
+iptables -I DOCKER-USER -i docker0 -j DROP
+iptables -I DOCKER-USER -i docker0 -d 10.0.0.5 -p tcp --dport 4000 -j ACCEPT
+```
+
+CI runs both on every push: the allowed address connects and `8.8.8.8:53`, the
+address the old allowlist let through, does not.
+
+What this does not give you:
+
+- A different allowlist per job. The rule is per daemon.
+- Names. With DNS dropped, a job reaches the service by address or by a `hosts` pin.
+- Pulls. The image has to be there before the rules are, since `podman pull` runs as the same user.
+- Other containers left alone. The docker rule applies to everything on `docker0`.
 
 ### Error codes
 
@@ -539,7 +578,7 @@ The gaps are in the table too. A table of only wins is a table nobody believes.
 | memory capped | `RLIMIT_AS`, advisory on macOS | yes, cgroup |
 | filesystem outside the sandbox | no, Landlock allowlist | no, read-only root |
 | network | host network, always open | none by default, `open` on request |
-| outbound filtering | **none, and none offered** | **none, and none offered** |
+| outbound filtering | **none in cordon**, host firewall by uid | **none in cordon**, host firewall by uid or bridge |
 | runs as root | as the daemon's user | no, and refuses if cordon is root |
 | available without Landlock | **no, the job is refused** | yes |
 | kernel level escape | shares the host kernel | shares the host kernel |
@@ -550,14 +589,14 @@ The **process backend has no network isolation**. It is for code you wrote, on a
 box where that is already true. Asking it for `"network": "none"` is a refusal,
 not a silent grant.
 
-**There is no outbound filtering anywhere in v1.** A container job has no
+**cordon does no outbound filtering.** A container job has no
 network or the host's full outbound access, nothing between. v0 shipped an
 "egress allowlist" that attached a bridge and set `--dns 0.0.0.0`; measured on a
 real host, a job with one allowlisted entry still reached `8.8.8.8:53` directly.
 `--dns` is not a packet filter. The feature is gone rather than documented,
 because a field named `egress` promising a boundary it does not have is worse
-than not offering one. A per-job network namespace with nftables rules is the
-real answer and is a v2 item.
+than not offering one. Narrowing `open` to one host is the host firewall's job,
+and [the recipe](#one-host-and-nothing-else) is tested in CI.
 
 cordon shares the host kernel either way. A kernel level escape defeats it and
 nothing here claims otherwise. If your threat model needs a hypervisor, you need
