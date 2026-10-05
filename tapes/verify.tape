@@ -5,7 +5,7 @@ Set Shell bash
 Set FontSize 15
 Set FontFamily "Menlo"
 Set Width 1180
-Set Height 620
+Set Height 900
 Set Padding 24
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
@@ -18,7 +18,7 @@ Enter
 Sleep 2s
 Show
 
-Type "cordon verify http://127.0.0.1:7900 rec-token"
+Type "cordon verify http://127.0.0.1:7900 rec-token --root ~/.cordon-rec"
 Sleep 600ms
 Enter
-Sleep 6s
+Sleep 9s

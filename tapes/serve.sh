@@ -14,4 +14,4 @@ for _ in $(seq 60); do
   curl -sf http://127.0.0.1:7900/v1/health >/dev/null && exit 0
   sleep 0.25
 done
-echo "daemon tidak naik"; cat /tmp/cordon-rec.log; exit 1
+echo "the daemon did not come up"; cat /tmp/cordon-rec.log; exit 1
