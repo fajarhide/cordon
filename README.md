@@ -75,7 +75,7 @@ Then run the daemon:
 cordon serve
 ```
 
-A 1.3 MB static binary, six dependencies, no runtime and no container needed.
+One 1.6 MB binary on Linux, six dependencies, no runtime and no container needed.
 
 ## What is cordon?
 
@@ -149,7 +149,7 @@ flowchart LR
         RT["Agent runtime or web app<br/>Rails, Express, Django<br/>OpenClaw, Hermes"]
     end
 
-    subgraph d["cordond, one static binary"]
+    subgraph d["cordond, one binary"]
         direction TB
         GUARD["<b>The guard</b><br/>resolve on disk, then decide"]
         PROC["process backend<br/>rlimits, scrubbed env"]

@@ -214,7 +214,7 @@ def frame(i: int) -> str:
         if k:
             s.append(sans(W / 2, 592, text, TEXT, 18, "middle", opacity=k))
     s.append(sans(W / 2, H - 16,
-                  "A sandbox is a directory, not a VM. One 1.3 MB binary, runs on a 1 GB VPS.",
+                  "A sandbox is a directory, not a VM. One 1.6 MB binary, runs on a 1 GB VPS.",
                   SUBT, 13, "middle", opacity=0.8))
     s.append("</svg>")
     return "".join(s)
