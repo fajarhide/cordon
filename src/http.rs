@@ -8,7 +8,7 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -103,6 +103,7 @@ pub fn router(cfg: Arc<Config>) -> Router {
         .route("/v1/fork", post(crate::fork::handler))
         .route("/v1/artifact/{token}", get(crate::artifact::handler))
         .route("/v1/token", post(crate::token::handler))
+        .route("/v1/token/{token}", delete(crate::token::revoke))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cfg),
             require_token,

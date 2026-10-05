@@ -1,18 +1,18 @@
 //! Tokens scoped to an owner prefix, so two applications can share one daemon (#17).
-//! A scoped token is a file named for the token, holding its prefix. Deleting it revokes it.
+//! A scoped token is a file named for the token, holding its prefix and an optional expiry (#23).
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::artifact::{is_opaque, opaque};
+use crate::artifact::{is_opaque, now_secs, opaque};
 use crate::config::Config;
 use crate::http::{ApiError, ApiJson};
 use crate::owner::Owner;
@@ -43,20 +43,57 @@ pub fn lookup(root: &Path, presented: &str) -> Option<Scope> {
     }
     let record =
         std::fs::read_to_string(root.join("tokens").join(format!("{presented}.rec"))).ok()?;
-    let segments: Vec<String> = record.trim_end().split('/').map(str::to_string).collect();
-    Owner::parse(&segments).ok().map(Scope::Prefix)
+    let (prefix, expires) = parse_record(&record)?;
+    if expires.is_some_and(|at| now_secs() >= at) {
+        return None;
+    }
+    Some(Scope::Prefix(prefix))
+}
+
+/// The prefix on the first line, and an expiry in unix seconds on the second if there is one.
+/// A second line that is not a number refuses the token, so a damaged expiry never means forever.
+fn parse_record(record: &str) -> Option<(Owner, Option<u64>)> {
+    let mut lines = record.lines();
+    let segments: Vec<String> = lines.next()?.split('/').map(str::to_string).collect();
+    let expires = match lines.next() {
+        None => None,
+        Some(at) => Some(at.parse().ok()?),
+    };
+    Some((Owner::parse(&segments).ok()?, expires))
+}
+
+/// Deletes the records of expired tokens and returns how many went (#23).
+pub fn reap(root: &Path) -> usize {
+    let now = now_secs();
+    // MAX means the clock is unreadable, which must not delete every token.
+    if now == u64::MAX {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(root.join("tokens")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|s| parse_record(&s))
+                .is_some_and(|(_, expires)| expires.is_some_and(|at| now >= at))
+        })
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
 }
 
 #[derive(Deserialize)]
 pub struct IssueRequest {
     pub prefix: Vec<String>,
+    /// Absent means the token lasts until it is revoked.
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
 }
 
-pub async fn handler(
-    State(cfg): State<Arc<Config>>,
-    Extension(scope): Extension<Scope>,
-    ApiJson(req): ApiJson<IssueRequest>,
-) -> Result<Json<Value>, ApiError> {
+fn operator_only(cfg: &Config, scope: &Scope) -> Result<(), ApiError> {
     // With no operator token every caller is unscoped, so a scoped token would narrow nothing.
     if cfg.token.is_none() {
         return Err(ApiError::bad_request(
@@ -64,14 +101,31 @@ pub async fn handler(
             "this daemon has no CORDON_TOKEN, so there is nothing for a scoped token to narrow",
         ));
     }
-    if scope != Scope::Operator {
+    if *scope != Scope::Operator {
         return Err(ApiError::forbidden(
             "operator_token_required",
-            "only the operator token can issue a scoped token",
+            "only the operator token can issue or revoke a scoped token",
         ));
     }
+    Ok(())
+}
+
+pub async fn handler(
+    State(cfg): State<Arc<Config>>,
+    Extension(scope): Extension<Scope>,
+    ApiJson(req): ApiJson<IssueRequest>,
+) -> Result<Json<Value>, ApiError> {
+    operator_only(&cfg, &scope)?;
     let prefix =
         Owner::parse(&req.prefix).map_err(|e| ApiError::bad_request("invalid_owner", e))?;
+    // Zero is refused, not read as "no expiry": the same trap as a zero memory limit (#9).
+    if req.ttl_seconds == Some(0) {
+        return Err(ApiError::bad_request(
+            "invalid_request",
+            "ttl_seconds must be at least 1; leave it out for a token that does not expire",
+        ));
+    }
+    let expires = req.ttl_seconds.map(|ttl| now_secs().saturating_add(ttl));
 
     let failed = |e: std::io::Error| {
         ApiError::new(
@@ -89,17 +143,39 @@ pub async fn handler(
         .create_new(true)
         .mode(0o600)
         .open(dir.join(format!("{token}.rec")))
-        .and_then(|mut f| writeln!(f, "{prefix}"))
+        .and_then(|mut f| match expires {
+            Some(at) => writeln!(f, "{prefix}\n{at}"),
+            None => writeln!(f, "{prefix}"),
+        })
         .map_err(failed)?;
 
     Ok(Json(
-        json!({ "token": token, "prefix": prefix.to_string() }),
+        json!({ "token": token, "prefix": prefix.to_string(), "expires": expires }),
     ))
+}
+
+/// DELETE /v1/token/{token}. Operator only, so one tenant cannot revoke another's token.
+pub async fn revoke(
+    State(cfg): State<Arc<Config>>,
+    Extension(scope): Extension<Scope>,
+    UrlPath(token): UrlPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    operator_only(&cfg, &scope)?;
+    let gone = || ApiError::new(StatusCode::NOT_FOUND, "token_not_found", "no such token");
+    // Shape before filesystem: the value becomes a file name.
+    if !is_opaque(&token, SHAPE) {
+        return Err(gone());
+    }
+    std::fs::remove_file(cfg.root.join("tokens").join(format!("{token}.rec")))
+        .map_err(|_| gone())?;
+    Ok(Json(json!({ "revoked": true })))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::testsupport::{fixture, fixture_with_token, get_auth, owner_dir, post_auth};
+    use crate::testsupport::{
+        fixture, fixture_with_token, get_auth, owner_dir, post_auth, send_auth,
+    };
     use axum::http::StatusCode;
     use serde_json::Value;
 
@@ -308,5 +384,96 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "a deleted token still works"
         );
+    }
+
+    #[tokio::test]
+    async fn a_token_past_its_ttl_is_refused_and_then_swept() {
+        let f = fixture_with_token("tok-ttl", "s3cret");
+        let body = r#"{"owner":["acme","budi"],"path":"notes.md"}"#;
+        let dir = f.cfg.root.join("tokens");
+
+        let (status, out) = post_auth(
+            &f,
+            "/v1/token",
+            r#"{"prefix":["acme","budi"],"ttl_seconds":3600}"#,
+            OP,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        let now = crate::artifact::now_secs();
+        let expires = out["expires"].as_u64().expect("an expiry");
+        assert!((now + 3590..=now + 3610).contains(&expires), "{out}");
+        let live = format!("Bearer {}", out["token"].as_str().unwrap());
+        let (status, _) = post_auth(&f, "/v1/resolve", body, Some(&live)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The same shape of record, already past its expiry, and one whose expiry is damaged.
+        let past = "tok_00000000000000000000000000000001";
+        let damaged = "tok_00000000000000000000000000000002";
+        std::fs::write(dir.join(format!("{past}.rec")), "acme/budi\n1\n").unwrap();
+        std::fs::write(dir.join(format!("{damaged}.rec")), "acme/budi\nnever\n").unwrap();
+        for token in [past, damaged] {
+            let auth = format!("Bearer {token}");
+            let (status, out) = post_auth(&f, "/v1/resolve", body, Some(&auth)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{token}: {out}");
+        }
+
+        let forever = issue(&f, r#"["acme","budi"]"#).await;
+        assert_eq!(super::reap(&f.cfg.root), 1, "only the expired record goes");
+        assert!(!dir.join(format!("{past}.rec")).exists());
+        assert!(dir.join(format!("{damaged}.rec")).exists());
+        for auth in [&live, &forever] {
+            let (status, _) = post_auth(&f, "/v1/resolve", body, Some(auth)).await;
+            assert_eq!(status, StatusCode::OK, "a live token was swept");
+        }
+
+        let (status, out) = post_auth(
+            &f,
+            "/v1/token",
+            r#"{"prefix":["acme"],"ttl_seconds":0}"#,
+            OP,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "zero was accepted: {out}");
+    }
+
+    #[tokio::test]
+    async fn the_operator_revokes_a_token_and_nobody_else_can() {
+        let f = fixture_with_token("tok-del", "s3cret");
+        let body = r#"{"owner":["acme","budi"],"path":"notes.md"}"#;
+        let budi = issue(&f, r#"["acme","budi"]"#).await;
+        let ani = issue(&f, r#"["acme","ani"]"#).await;
+        let uri = |auth: &str| format!("/v1/token/{}", auth.trim_start_matches("Bearer "));
+
+        let (status, out) = send_auth(&f, "DELETE", &uri(&ani), Some(&budi)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{out}");
+        assert_eq!(out["error"]["code"], "operator_token_required", "{out}");
+        let (status, _) = send_auth(&f, "DELETE", &uri(&budi), Some(&budi)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a token revoked itself");
+
+        let (status, out) = send_auth(&f, "DELETE", &uri(&budi), OP).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        let (status, _) = post_auth(&f, "/v1/resolve", body, Some(&budi)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a revoked token still works"
+        );
+        let ani_body = r#"{"owner":["acme","ani"],"path":"secret.md"}"#;
+        let (status, _) = post_auth(&f, "/v1/resolve", ani_body, Some(&ani)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "revoking one token took another with it"
+        );
+
+        for missing in [
+            uri(&budi),
+            "/v1/token/tok_ffffffffffffffffffffffffffffffff".to_string(),
+            "/v1/token/..%2f..%2fartifacts".to_string(),
+        ] {
+            let (status, out) = send_auth(&f, "DELETE", &missing, OP).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{missing}: {out}");
+        }
     }
 }

@@ -123,6 +123,27 @@ describe("Cordon", () => {
     expect(res.network).toBe("open");
   });
 
+  test("issueToken sends the prefix and the ttl, revokeToken deletes by token", async () => {
+    const seen: { url: string; method?: string; body?: string }[] = [];
+    const c = new Cordon("http://x", async (url, init) => {
+      seen.push({ url, method: init?.method, body: init?.body as string | undefined });
+      return ok({ token: "tok_abc", prefix: "acme", expires: 99, revoked: true });
+    });
+
+    const out = await c.issueToken(["acme"], 60);
+    expect(out.token).toBe("tok_abc");
+    expect(JSON.parse(seen[0].body ?? "")).toEqual({ prefix: ["acme"], ttl_seconds: 60 });
+
+    // No ttl means the field is absent, not zero, which the daemon refuses.
+    await c.issueToken(["acme"]);
+    expect(JSON.parse(seen[1].body ?? "")).toEqual({ prefix: ["acme"] });
+
+    await c.revokeToken("tok_abc");
+    expect(seen[2].url).toBe("http://x/v1/token/tok_abc");
+    expect(seen[2].method).toBe("DELETE");
+    expect(seen[2].body).toBeUndefined();
+  });
+
   test("fork passes both owners", async () => {
     let body: unknown;
     const c = new Cordon("http://x", async (_u, init) => {

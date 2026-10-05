@@ -42,6 +42,19 @@ module Cordon
       post("/v1/fork", from: from, to: to)
     end
 
+    # Operator token only. Without ttl_seconds the token lasts until it is revoked.
+    def issue_token(prefix, ttl_seconds: nil)
+      payload = { prefix: prefix }
+      payload[:ttl_seconds] = ttl_seconds if ttl_seconds
+      post("/v1/token", payload)
+    end
+
+    # Operator token only.
+    def revoke_token(token)
+      send_json(:delete, "/v1/token/#{token}", nil)
+      nil
+    end
+
     # The owner is required: a token is bound to one owner on the daemon (#8).
     def artifact(token, owner)
       q = URI.encode_www_form_component(owner.join("/"))
@@ -54,7 +67,11 @@ module Cordon
     private
 
     def post(path, payload)
-      status, body = @transport.call(:post, @base + path, headers, JSON.generate(payload))
+      send_json(:post, path, JSON.generate(payload))
+    end
+
+    def send_json(method, path, payload)
+      status, body = @transport.call(method, @base + path, headers, payload)
 
       # A gateway in front of the daemon can answer with HTML, so the body may not be JSON.
       parsed = begin
@@ -80,7 +97,7 @@ module Cordon
 
     def http(method, url, headers, body)
       uri = URI(url)
-      req = (method == :post ? Net::HTTP::Post : Net::HTTP::Get).new(uri, headers)
+      req = Net::HTTP.const_get(method.to_s.capitalize).new(uri, headers)
       req.body = body if body
       res = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https") { |h| h.request(req) }
       [res.code.to_i, res.body.to_s]

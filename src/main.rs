@@ -120,7 +120,11 @@ async fn serve() -> Result<(), String> {
         loop {
             tick.tick().await;
             let root = root.clone();
-            let _ = tokio::task::spawn_blocking(move || artifact::reap(&root)).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                artifact::reap(&root);
+                token::reap(&root);
+            })
+            .await;
         }
     });
     println!(

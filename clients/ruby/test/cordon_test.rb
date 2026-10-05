@@ -84,6 +84,27 @@ class CordonTest < Minitest::Test
     refute @calls[0][:headers].key?("authorization")
   end
 
+  def test_issue_token_sends_the_prefix_and_the_ttl
+    out = client(200, '{"token":"tok_abc","prefix":"acme","expires":99}').issue_token(%w[acme], ttl_seconds: 60)
+
+    assert_equal "tok_abc", out["token"]
+    assert_equal "http://x/v1/token", @calls[0][:url]
+    assert_equal({ "prefix" => %w[acme], "ttl_seconds" => 60 }, @calls[0][:body])
+  end
+
+  # Absent, not zero: the daemon refuses a zero ttl.
+  def test_issue_token_without_a_ttl_leaves_the_field_out
+    client(200, '{"token":"tok_abc"}').issue_token(%w[acme])
+    assert_equal({ "prefix" => %w[acme] }, @calls[0][:body])
+  end
+
+  def test_revoke_token_deletes_by_token
+    assert_nil client(200, '{"revoked":true}').revoke_token("tok_abc")
+    assert_equal :delete, @calls[0][:method]
+    assert_equal "http://x/v1/token/tok_abc", @calls[0][:url]
+    assert_nil @calls[0][:body]
+  end
+
   def test_fork_passes_both_owners
     out = client(200, '{"forked":"acme/copy","skipped_links":0}').fork(%w[acme budi], %w[acme copy])
 

@@ -239,7 +239,7 @@ real.
 
 ## API
 
-Six endpoints. You can adopt the first one alone and stop there.
+Seven endpoints. You can adopt the first one alone and stop there.
 
 | | |
 | --- | --- |
@@ -248,6 +248,7 @@ Six endpoints. You can adopt the first one alone and stop there.
 | `GET /v1/artifact/{token}` | fetch one collected file by token |
 | `POST /v1/fork` | copy a sandbox to a new owner, never overwriting |
 | `POST /v1/token` | issue a token scoped to an owner prefix, operator only |
+| `DELETE /v1/token/{token}` | revoke one, operator only |
 | `GET /v1/health` | liveness |
 
 ### The cheapest way to adopt it
@@ -311,8 +312,22 @@ inside it, an artifact belonging to another prefix answers like one that never
 existed, and `inherit` stops at the prefix instead of reaching the owners above
 it. The prefix is compared a segment at a time, so `acme2` is not inside `acme`.
 
-A token is a file under `CORDON_ROOT/tokens`, mode 600. It does not expire, and
-deleting the file revokes it.
+Give a token a lifetime with `ttl_seconds`, and take one back at any time:
+
+```bash
+$ curl -s -X POST localhost:7777/v1/token -H "authorization: Bearer $CORDON_TOKEN" \
+    -H 'content-type: application/json' -d '{"prefix":["acme"],"ttl_seconds":3600}'
+{"expires":1791140400,"prefix":"acme","token":"tok_9c41..."}
+
+$ curl -s -X DELETE localhost:7777/v1/token/tok_9c41... -H "authorization: Bearer $CORDON_TOKEN"
+{"revoked":true}
+```
+
+Without `ttl_seconds` a token lasts until it is revoked. Zero is refused rather
+than read as "never". An expired or revoked token gets the same `401` as one
+that never existed. Both clients carry `issueToken` and `revokeToken`. A token
+is a file under `CORDON_ROOT/tokens`, mode 600, and expired ones are swept with
+the artifact records.
 
 ### Network
 
@@ -379,7 +394,8 @@ on prose.
 | --- | --- | --- |
 | `unauthorized` | 401 | no bearer token, the wrong one, or a revoked one |
 | `owner_outside_token_scope` | 403 | a scoped token named an owner outside its prefix |
-| `operator_token_required` | 403 | a scoped token tried to issue a token |
+| `operator_token_required` | 403 | a scoped token tried to issue or revoke a token |
+| `token_not_found` | 404 | a revoke named a token that does not exist |
 | `invalid_owner` | 400 | a segment the daemon or the filesystem will not take |
 | `absolute_path_rejected` | 400 | paths are relative to the owner workspace |
 | `path_escapes_workspace` | 403 | the path resolved outside it |
@@ -510,8 +526,10 @@ ok   scoped: a lookalike refused      status 403, code owner_outside_token_scope
 ok   scoped: no inherit above it      status 403, code path_escapes_workspace
 ok   scoped: no fork across           status 403, code owner_outside_token_scope
 ok   scoped: cannot issue tokens      status 403, code operator_token_required
+ok   scoped: refused past its ttl     status 200, then 401 two seconds later
+ok   scoped: refused once revoked     status 200, then 401 after the revoke
 
-all 29 checks passed
+all 31 checks passed
 ```
 
 </details>
@@ -668,12 +686,12 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 134 tests on Linux, 133 elsewhere
+cargo test                                      # 136 tests on Linux, 135 elsewhere
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
-cd clients/typescript && bun test               # 9 tests
-ruby clients/ruby/test/cordon_test.rb           # 10 tests, stdlib only
+cd clients/typescript && bun test               # 10 tests
+ruby clients/ruby/test/cordon_test.rb           # 13 tests, stdlib only
 
 # the container backend, against either runtime. CORDON_REQUIRE_DOCKER makes a
 # skipped container test a failure, which is how CI stops coverage lapsing.
@@ -724,7 +742,7 @@ small.
 
 ## Security
 
-134 tests, and four mutations each confirmed to break the suite.
+136 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the

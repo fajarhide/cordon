@@ -146,7 +146,7 @@ fn parse_record(s: &str) -> Option<(String, PathBuf, u64)> {
     Some((owner, path, expires))
 }
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

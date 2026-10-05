@@ -77,7 +77,7 @@ const DATA_PLANE_NAMES: [&str; 6] = [
 ];
 
 /// Named once for the same reason (#17).
-const SCOPE_NAMES: [&str; 7] = [
+const SCOPE_NAMES: [&str; 9] = [
     "scoped: its own prefix works",
     "scoped: another owner refused",
     "scoped: a lookalike refused",
@@ -85,6 +85,8 @@ const SCOPE_NAMES: [&str; 7] = [
     "scoped: no inherit above it",
     "scoped: no fork across",
     "scoped: cannot issue tokens",
+    "scoped: refused past its ttl",
+    "scoped: refused once revoked",
 ];
 
 /// Path strings posted to `/v1/resolve`, each one a confused or hostile caller actually sends.
@@ -388,13 +390,17 @@ async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
     let mut out = Vec::with_capacity(names.len());
 
     // Inside the prefix first, to rule out a daemon that refuses this token everything.
-    let (status, _) = scoped
-        .post(
-            "/v1/resolve",
-            r#"{"owner":["cordon-verify","a"],"path":"x.md"}"#,
+    // Compared with the operator's answer: with no job run yet, owner a has no workspace
+    // and the same request is refused for everyone.
+    let inside = r#"{"owner":["cordon-verify","a"],"path":"x.md"}"#;
+    let (operator, _) = c.post("/v1/resolve", inside).await?;
+    let (status, _) = scoped.post("/v1/resolve", inside).await?;
+    out.push(if operator != 200 {
+        Check::skip(
+            names[0],
+            format!("the operator token gets status {operator} for that request too"),
         )
-        .await?;
-    out.push(if status == 200 {
+    } else if status == 200 {
         Check::pass(names[0], "status 200 for its own owner")
     } else {
         Check::fail(names[0], format!("status {status} for its own owner"))
@@ -453,6 +459,56 @@ async fn scope_checks(c: &Client) -> Result<Vec<Check>, String> {
         Check::fail(names[6], "a scoped token issued another token")
     } else {
         Check::refused(names[6], status, &raw)
+    });
+
+    // Expiry and revocation (#23). Each token is shown to work first, so the
+    // refusal afterwards is the daemon acting and not a token that never worked.
+    let own = r#"{"owner":["cordon-verify","a"],"path":"x.md"}"#;
+    let fresh = |raw: &str| {
+        json_string(raw, "token").map(|t| Client {
+            host: c.host.clone(),
+            token: Some(t),
+        })
+    };
+
+    let (_, raw) = c
+        .post(
+            "/v1/token",
+            r#"{"prefix":["cordon-verify","a"],"ttl_seconds":1}"#,
+        )
+        .await?;
+    out.push(match fresh(&raw) {
+        None => Check::skip(names[7], "no short-lived token could be issued"),
+        Some(short) => {
+            let (before, _) = short.post("/v1/resolve", own).await?;
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            let (after, _) = short.post("/v1/resolve", own).await?;
+            match (before, after) {
+                (200, 401) => Check::pass(names[7], "status 200, then 401 two seconds later"),
+                (200, s) => Check::fail(names[7], format!("status {s} after its ttl had passed")),
+                (s, _) => Check::skip(names[7], format!("the token never worked, status {s}")),
+            }
+        }
+    });
+
+    let (_, raw) = c.post("/v1/token", issue).await?;
+    out.push(match fresh(&raw) {
+        None => Check::skip(names[8], "no token could be issued to revoke"),
+        Some(doomed) => {
+            let (before, _) = doomed.post("/v1/resolve", own).await?;
+            let path = format!("/v1/token/{}", doomed.token.as_deref().unwrap_or_default());
+            let (revoked, _) = c.send("DELETE", &path, None).await?;
+            let (after, _) = doomed.post("/v1/resolve", own).await?;
+            match (before, revoked, after) {
+                (200, 200, 401) => Check::pass(names[8], "status 200, then 401 after the revoke"),
+                (200, 200, s) => Check::fail(names[8], format!("status {s} after it was revoked")),
+                (200, s, _) => Check::skip(
+                    names[8],
+                    format!("this daemon would not revoke it, status {s}"),
+                ),
+                (s, _, _) => Check::skip(names[8], format!("the token never worked, status {s}")),
+            }
+        }
     });
 
     Ok(out)
@@ -556,7 +612,7 @@ pub fn tidy(root: Option<&Path>, passed: bool, w: &mut impl Write, s: Style) {
         Some(root) => {
             // Whole-prefix match, so an owner named cordon-verify-something keeps its tokens.
             for e in std::fs::read_dir(root.join("tokens")).into_iter().flatten().flatten() {
-                if std::fs::read_to_string(e.path()).is_ok_and(|s| s.trim_end() == "cordon-verify/a") {
+                if std::fs::read_to_string(e.path()).is_ok_and(|s| s.lines().next() == Some("cordon-verify/a")) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -836,6 +892,7 @@ mod tests {
         let tokens = root.join("tokens");
         std::fs::create_dir_all(&tokens).unwrap();
         std::fs::write(tokens.join("tok_ours.rec"), "cordon-verify/a\n").unwrap();
+        std::fs::write(tokens.join("tok_ours_ttl.rec"), "cordon-verify/a\n99\n").unwrap();
         std::fs::write(tokens.join("tok_theirs.rec"), "cordon-verify-prod/a\n").unwrap();
         let say = |root: Option<&Path>, passed| {
             let mut out = Vec::new();
@@ -858,6 +915,10 @@ mod tests {
         assert!(
             !tokens.join("tok_ours.rec").exists(),
             "verify's own token is still valid"
+        );
+        assert!(
+            !tokens.join("tok_ours_ttl.rec").exists(),
+            "an expiring one was left behind"
         );
         assert!(
             tokens.join("tok_theirs.rec").exists(),

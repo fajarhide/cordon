@@ -111,6 +111,30 @@ pub async fn post_typed(
     (status, body)
 }
 
+/// Any method with no body, for the endpoints that are not a POST.
+pub async fn send_auth(
+    f: &Fixture,
+    method: &str,
+    uri: &str,
+    auth: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(a) = auth {
+        b = b.header("authorization", a);
+    }
+    let res = crate::http::router(Arc::clone(&f.cfg))
+        .oneshot(b.body(Body::empty()).expect("build request"))
+        .await
+        .expect("router answered");
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read body");
+    let body = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
+    (status, body)
+}
+
 pub async fn get(f: &Fixture, uri: &str) -> (StatusCode, Vec<u8>) {
     get_auth(f, uri, None).await
 }

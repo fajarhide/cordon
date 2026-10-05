@@ -76,6 +76,19 @@ export class Cordon {
     return this.post("/v1/fork", { from, to });
   }
 
+  /** Operator token only. Without `ttlSeconds` the token lasts until it is revoked. */
+  issueToken(
+    prefix: string[],
+    ttlSeconds?: number,
+  ): Promise<{ token: string; prefix: string; expires: number | null }> {
+    return this.post("/v1/token", { prefix, ttl_seconds: ttlSeconds });
+  }
+
+  /** Operator token only. */
+  async revokeToken(token: string): Promise<void> {
+    await this.send("DELETE", `/v1/token/${token}`);
+  }
+
   /**
    * The owner is required: a token is bound to one owner on the daemon (#8).
    */
@@ -96,11 +109,15 @@ export class Cordon {
     return h;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private post<T>(path: string, body: unknown): Promise<T> {
+    return this.send<T>("POST", path, body);
+  }
+
+  private async send<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await this.fetcher(this.base + path, {
-      method: "POST",
+      method,
       headers: this.headers(),
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
 
     // A gateway in front of the daemon can answer with HTML, so the body may not be JSON.
