@@ -1,0 +1,77 @@
+name: Release
+
+# A tag publishes a release. A manual run builds the same binaries and keeps them as
+# workflow artifacts, so the pipeline can be checked before anything is tagged.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # musl and static, so one file runs on any Linux. A glibc build from 24.04
+      # needs glibc 2.39 and fails on 22.04 and Debian 12.
+      - name: Build
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Check it is static and that it runs
+        run: |
+          bin=target/${{ matrix.target }}/release/cordon
+          file "$bin"
+          file "$bin" | grep -q "statically linked" || { echo "not a static binary"; exit 1; }
+          "$bin" --help | head -1
+          dir=$(mktemp -d)
+          "$bin" demo "$dir/demo" | tail -1
+
+      - name: Package
+        run: |
+          name=cordon-${GITHUB_REF_NAME#v}-${{ matrix.target }}
+          [ "$GITHUB_REF_TYPE" = tag ] || name=cordon-dev-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/cordon LICENSE README.md "$name/"
+          cp packaging/cordond.service "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}.tar.gz
+            ${{ env.ASSET }}.tar.gz.sha256
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=packaging/release-notes/${GITHUB_REF_NAME}.md
+          test -f "$notes" || { echo "missing $notes"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" dist/* --title "cordon $GITHUB_REF_NAME" --notes-file "$notes"
