@@ -98,6 +98,25 @@ cordon is that decision, in one place, behind an HTTP call:
 It is not a hypervisor and never claims to be. It shares the host kernel, which
 is the trade that lets it run where KVM is not available.
 
+## Use cases
+
+cordon fits wherever one server serves many users and the model picks which file
+to open or what code to run.
+
+- **AI chat with per-user uploads.** The model reads and writes files on a user's behalf. One `/v1/resolve` call in front of your file tools keeps one user's turn out of another user's uploads, even when a document talks the model into trying.
+- **Code the model runs for a user.** Spreadsheets, reports, analysis scripts. The job runs in that user's sandbox through `/v1/run`, and its output comes back as a token another user cannot fetch.
+- **Multi-tenant SaaS with orgs and teams.** An owner is a path such as `acme/legal/budi`. With `inherit` a member reads the shared files of its team and org, and never a teammate's.
+- **Two applications on one daemon.** Each gets a token scoped to its own prefix, with an optional lifetime, revocable at any time.
+- **Starter workspaces.** `/v1/fork` copies a template sandbox to a new owner, never over an existing one, and leaves symlinks behind.
+- **A sandbox runner on a cheap VPS.** microVM sandboxes need `/dev/kvm`, which most VPS plans do not expose. cordon is one binary on a 1 GB box.
+- **Proof in a deploy pipeline.** `cordon verify` fires 31 attacks at the running daemon and fails the pipeline if one lands.
+
+What it is not for:
+
+- **Hostile code from strangers.** cordon shares the host kernel, so a kernel exploit gets past it. That needs a VM.
+- **One agent on a developer's laptop.** A wrapper such as [nono](https://github.com/nolabs-ai/nono) fits that better.
+- **Per-job internet filtering.** A job gets `none` or `open`. Narrowing `open` to one host is the [host firewall's job](#one-host-and-nothing-else), and it applies per daemon.
+
 ## Why we built cordon
 
 Two measurements, taken on a real deployment, decided the design.
