@@ -117,6 +117,35 @@ What it is not for:
 - **One agent on a developer's laptop.** A wrapper such as [nono](https://github.com/nolabs-ai/nono) fits that better.
 - **Per-job internet filtering.** A job gets `none` or `open`. Narrowing `open` to one host is the [host firewall's job](#one-host-and-nothing-else), and it applies per daemon.
 
+## How cordon compares
+
+Most agent sandboxes give every session its own microVM. That is the strongest
+isolation on offer, and it needs a host with KVM, which most VPS plans do not
+have. cordon makes the other trade: no VM, the per-user rules built in, and a
+weaker wall against a kernel exploit.
+
+| | cordon | Microsandbox | E2B | boat.dev | gVisor |
+| --- | --- | --- | --- | --- | --- |
+| isolation | Landlock or a container, host kernel shared | microVM | Firecracker microVM | a KVM machine you rent | user-space kernel |
+| needs KVM | no | yes on Linux, or Apple Silicon | yes, on the nodes | KVM is what it sells | no |
+| runs on | your server | your server | their cloud, or your KVM nodes | their machines, EU regions | your server |
+| keeps users apart | built in: owners, scoped tokens, owner-bound artifacts | you write it | you write it | you write it | you write it |
+| extra cost | none on a box you already run | none, if the box has KVM | per second of use | plans tiered by sandbox starts | none |
+
+Third-party rows come from each project's own docs, checked in September and
+October 2026.
+
+Pick cordon when:
+
+- **Your server has no `/dev/kvm`.** None of the VPS hosts we checked had one.
+- **Users must stay apart.** Owners, inheritance, scoped tokens and artifact tokens are there on day one, instead of being rewritten in every service.
+- **You want to guard the file tools you already have.** `/v1/resolve` needs no job execution at all.
+- **Footprint matters.** One 1.6 MB binary, about 7 MB of RSS while serving, on capacity you already pay for.
+- **You want proof.** `cordon verify` fires 31 attacks at your running daemon and fails if one lands.
+
+Pick a microVM when the code comes from strangers and a kernel exploit is part
+of your threat model.
+
 ## Why we built cordon
 
 Two measurements, taken on a real deployment, decided the design.
