@@ -114,7 +114,9 @@ pub fn container_args(
         "--tmpfs".into(),
         "/tmp:rw,noexec,nosuid,size=64m".into(),
         "-v".into(),
-        format!("{}:/workspace", job.workspace.display()),
+        // Shared SELinux label: unlabelled fails on enforcing hosts, and :Z cuts off a
+        // concurrent job for the same owner. Runtimes ignore it without SELinux (#24).
+        format!("{}:/workspace:z", job.workspace.display()),
         "-w".into(),
         "/workspace".into(),
     ];
@@ -250,11 +252,23 @@ mod tests {
             "--security-opt no-new-privileges",
             "--pids-limit 128",
             "--memory 128m",
-            "-v /ws:/workspace",
+            "-v /ws:/workspace:z",
             "-w /workspace",
         ] {
             assert!(a.contains(want), "missing {want} in: {a}");
         }
+    }
+
+    /// `:Z` would give each job a private label, so a second job for the same owner would
+    /// lock the first out of its own workspace (#24).
+    #[test]
+    fn the_workspace_label_is_shared_never_private() {
+        let a = joined(&job("true"));
+        assert!(a.contains("/ws:/workspace:z "), "{a}");
+        assert!(
+            !a.contains(":Z"),
+            "a private label cuts off concurrent jobs: {a}"
+        );
     }
 
     /// Without keep-id a rootless podman job cannot write to its own bind-mounted workspace.

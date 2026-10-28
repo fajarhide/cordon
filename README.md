@@ -699,6 +699,11 @@ the uid in `--user` is a host uid already. `--network none`,
 daemon's own uid, which is what keeps the bind-mounted sandbox writable from both
 sides.
 
+On SELinux hosts (Fedora, RHEL and their relatives) the sandbox is mounted with
+`:z`, a shared label. Unlabelled, the job cannot write to it. With `:Z`, a
+private label, a second job for the same owner relabels the directory and locks
+the first one out mid-run. Without SELinux the runtime ignores the option.
+
 Pick by who wrote the code. Yours: process. The model's, or your customer's:
 container.
 
@@ -734,7 +739,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 136 tests on Linux, 135 elsewhere
+cargo test                                      # 137 tests on Linux, 136 elsewhere
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -790,7 +795,7 @@ small.
 
 ## Security
 
-136 tests, and four mutations each confirmed to break the suite.
+137 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the
