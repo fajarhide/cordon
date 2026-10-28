@@ -24,6 +24,16 @@ whether a path the model chose belongs to the session it came from.
 
 ## Quick start
 
+On Linux, x86_64 or aarch64, the release binary is one static file:
+
+```bash
+curl -fsSL https://github.com/fajarhide/cordon/releases/latest/download/cordon-$(uname -m)-unknown-linux-musl.tar.gz | tar xz
+sudo install cordon-$(uname -m)-unknown-linux-musl/cordon /usr/local/bin/
+cordon demo
+```
+
+Anywhere else, or from source:
+
 ```bash
 cargo install --git https://github.com/fajarhide/cordon
 cordon demo
