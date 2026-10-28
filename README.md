@@ -14,7 +14,7 @@ whether a path the model chose belongs to the session it came from.
 > each closed issue carries its own reproducer and what changed. Read
 > [them](https://github.com/fajarhide/cordon/issues?q=is%3Aissue+is%3Aclosed)
 > before trusting any of this. Several are counterexamples to designs that look
-> obviously right, and [#21](https://github.com/fajarhide/cordon/issues/21)
+> obviously right, and [#25](https://github.com/fajarhide/cordon/issues/25)
 > carries the two lessons that cost the most.
 >
 > The last one changed the API rather than the code. The egress allowlist
