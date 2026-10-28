@@ -267,6 +267,11 @@ mod tests {
             !owner_dir(&f.cfg.root, &["acme", "budi", "stolen"]).exists(),
             "a refused fork still copied the sibling"
         );
+        // The scope is checked before resolve creates a workspace, so a refusal leaves nothing.
+        assert!(
+            !owner_dir(&f.cfg.root, &["acme", "bud"]).exists(),
+            "a refused owner got a workspace"
+        );
     }
 
     /// An ancestor above the token's prefix belongs to somebody else, even with inherit.

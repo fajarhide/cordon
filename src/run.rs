@@ -201,7 +201,7 @@ fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> 
 
 /// An owner the filesystem cannot hold is the caller's fault: a 400, not a 500 (#10).
 /// That covers a path component that is a file, and a name too long for the disk.
-fn workspace_error(e: std::io::Error, owner: &Owner) -> ApiError {
+pub fn workspace_error(e: std::io::Error, owner: &Owner) -> ApiError {
     use std::io::ErrorKind;
     let is_too_long = e.raw_os_error() == Some(libc::ENAMETOOLONG);
     if matches!(

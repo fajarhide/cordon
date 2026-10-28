@@ -302,12 +302,13 @@ Seven endpoints. You can adopt the first one alone and stop there.
 ### The cheapest way to adopt it
 
 Ask before you open a file. No job execution, no container, no change to how
-your code reads files.
+your code reads files. The first call for a new owner creates its sandbox, so a
+path that does not exist yet comes back ready to write.
 
 ```bash
 $ curl -s -X POST localhost:7777/v1/resolve -H 'content-type: application/json' \
     -d '{"owner":["acme","budi"],"path":"notes.md"}'
-{"exists":true,"resolved":"/var/lib/cordon/owners/acme/budi/notes.md"}
+{"exists":true,"resolved":"/var/lib/cordon/owners/acme/budi/.workspace/notes.md"}
 
 $ curl -s -X POST localhost:7777/v1/resolve -H 'content-type: application/json' \
     -d '{"owner":["acme","budi"],"path":"../ani/secret.md"}'
@@ -739,7 +740,7 @@ that user in the `docker` group, which is equivalent to root on the host.
 ## Local development
 
 ```bash
-cargo test                                      # 137 tests on Linux, 136 elsewhere
+cargo test                                      # 138 tests on Linux, 137 elsewhere
 cargo test --test footprint -- --nocapture      # the 20 MB claim, measured
 cargo clippy --all-targets -- -D warnings
 cargo check --target x86_64-unknown-linux-gnu   # Linux is the target platform
@@ -795,7 +796,7 @@ small.
 
 ## Security
 
-137 tests, and four mutations each confirmed to break the suite.
+138 tests, and four mutations each confirmed to break the suite.
 
 The lesson from the review is worth more than the count: the two modules with
 the heaviest test coverage, `src/guard.rs` and `src/owner.rs`, were not the

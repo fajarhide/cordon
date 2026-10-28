@@ -30,6 +30,9 @@ pub async fn handler(
     ApiJson(req): ApiJson<ResolveRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let owner = owner_or_error(&scope, &req.owner)?;
+    // The guard resolves through the real parent, so a first-time owner needs its workspace (#26).
+    std::fs::create_dir_all(owner.dir(&cfg.root))
+        .map_err(|e| crate::run::workspace_error(e, &owner))?;
     let resolved = Guard::new(&cfg.root, &owner, req.inherit, &scope)
         .resolve(&req.path)
         .map_err(|e| guard_error(e, &req.path))?;
@@ -105,6 +108,36 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["exists"], false);
+    }
+
+    #[tokio::test]
+    async fn a_first_time_owner_gets_an_answer_and_a_workspace() {
+        let f = fixture("resolve-newcomer");
+        let ws = owner_dir(&f.cfg.root, &["acme", "newcomer"]);
+        assert!(!ws.exists());
+        let (status, body) = post(
+            &f,
+            "/v1/resolve",
+            r#"{"owner":["acme","newcomer"],"path":"notes.md"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["exists"], false);
+        assert!(
+            ws.is_dir(),
+            "the answer named a path the caller cannot write"
+        );
+
+        // Still a refusal for a sibling, and no workspace is made for a refused owner.
+        let (status, _) = post(
+            &f,
+            "/v1/resolve",
+            r#"{"owner":["acme","newcomer"],"path":"../ani/secret.md"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = post(&f, "/v1/resolve", r#"{"owner":["acme",".."],"path":"x"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
