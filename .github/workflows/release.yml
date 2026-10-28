@@ -13,6 +13,8 @@ permissions:
 jobs:
   build:
     strategy:
+      # One architecture failing must not hide whether the other builds.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
@@ -35,14 +37,16 @@ jobs:
         run: |
           bin=target/${{ matrix.target }}/release/cordon
           file "$bin"
-          file "$bin" | grep -q "statically linked" || { echo "not a static binary"; exit 1; }
+          # Rust links musl as static-pie by default, which file(1) names differently.
+          file "$bin" | grep -qE "statically linked|static-pie linked" || { echo "not a static binary"; exit 1; }
           "$bin" --help | head -1
           dir=$(mktemp -d)
           "$bin" demo "$dir/demo" | tail -1
 
       - name: Package
         run: |
-          name=cordon-${GITHUB_REF_NAME#v}-${{ matrix.target }}
+          # No version in the name, so releases/latest/download/<name> keeps working.
+          name=cordon-${{ matrix.target }}
           [ "$GITHUB_REF_TYPE" = tag ] || name=cordon-dev-${{ matrix.target }}
           mkdir "$name"
           cp target/${{ matrix.target }}/release/cordon LICENSE README.md "$name/"
