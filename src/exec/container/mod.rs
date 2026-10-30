@@ -9,12 +9,16 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{read_capped, ExecError, Job, Network, Outcome};
+use super::{read_capped, ExecError, Job, Network, Outcome, Spawned};
 
 const PIDS_LIMIT: &str = "128";
 
 pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError> {
-    let (mut child, network) = spawn(cli, image, &job).await?;
+    let Spawned {
+        mut child,
+        network,
+        env_file: _env_file,
+    } = spawn(cli, image, &job).await?;
     let started = Instant::now();
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -59,15 +63,23 @@ pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError>
 
 /// The job's container, started, and the network it actually got. `run` waits on it; a stdio job
 /// (`/v1/stdio`) relays it for as long as its client stays connected.
-pub async fn spawn(
-    cli: &str,
-    image: &str,
-    job: &Job,
-) -> Result<(tokio::process::Child, Network), ExecError> {
+pub async fn spawn(cli: &str, image: &str, job: &Job) -> Result<Spawned, ExecError> {
     // Unasked means no network; this backend can provide either.
     let network = job.network.clone().unwrap_or_default();
     // Built before probing the runtime, so a malformed host pin is a request error.
-    let args = container_args(cli, image, job, &network, current_ids()?)?;
+    let env_file = if job.env.is_empty() {
+        None
+    } else {
+        Some(EnvFile::write(&job.env)?)
+    };
+    let args = container_args(
+        cli,
+        image,
+        job,
+        &network,
+        current_ids()?,
+        env_file.as_ref().map(|f| f.path.as_path()),
+    )?;
     cli_reachable(cli).await?;
     image_present(cli, image).await?;
     let child = Command::new(cli)
@@ -78,7 +90,53 @@ pub async fn spawn(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| ExecError::BackendUnavailable(format!("{cli}: {e}")))?;
-    Ok((child, network))
+    Ok(Spawned {
+        child,
+        network,
+        env_file,
+    })
+}
+
+/// The job's environment for `--env-file`: owner-only, removed when the job's `Spawned` goes.
+/// The CLI reads it at a time cordon cannot see, so it stays for the whole job.
+pub struct EnvFile {
+    pub path: std::path::PathBuf,
+}
+
+impl EnvFile {
+    fn write(env: &[(String, String)]) -> Result<Self, ExecError> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut body = String::new();
+        for (k, v) in env {
+            // One line per variable in an env file: a newline would start a second one.
+            if v.contains(['\n', '\r', '\0']) {
+                return Err(ExecError::Unsupported(format!(
+                    "the value of {k} has a newline or a NUL"
+                )));
+            }
+            body.push_str(&format!("{k}={v}\n"));
+        }
+        let mut rand = [0u8; 12];
+        getrandom::fill(&mut rand).map_err(|e| ExecError::Spawn(format!("random: {e}")))?;
+        let name: String = rand.iter().map(|b| format!("{b:02x}")).collect();
+        let path = std::env::temp_dir().join(format!("cordon-env-{name}"));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| ExecError::Spawn(format!("env file: {e}")))?;
+        f.write_all(body.as_bytes())
+            .map_err(|e| ExecError::Spawn(format!("env file: {e}")))?;
+        Ok(EnvFile { path })
+    }
+}
+
+impl Drop for EnvFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// The daemon's own uid:gid, not `nobody`, which cannot write the daemon-owned bind mount.
@@ -102,6 +160,7 @@ pub fn container_args(
     job: &Job,
     network: &Network,
     user: String,
+    env_file: Option<&std::path::Path>,
 ) -> Result<Vec<String>, ExecError> {
     let mut a: Vec<String> = vec![
         "run".into(),
@@ -137,6 +196,11 @@ pub fn container_args(
         a.push("keep-id".into());
     }
     a.extend(network_args(network)?);
+    // Values ride in a file, so they are never on this command line or in the CLI's own environment.
+    if let Some(f) = env_file {
+        a.push("--env-file".into());
+        a.push(f.display().to_string());
+    }
 
     // Nothing may be appended past the image: an entrypoint of `--privileged` stays an argument.
     a.push(image.to_string());
@@ -229,11 +293,12 @@ mod tests {
             },
             network: None,
             unsafe_process: cfg!(not(target_os = "linux")),
+            env: Vec::new(),
         }
     }
 
     fn args_for(j: &Job, net: &Network) -> Vec<String> {
-        container_args(&cli(), "alpine:3.20", j, net, "1000:1000".into()).unwrap()
+        container_args(&cli(), "alpine:3.20", j, net, "1000:1000".into(), None).unwrap()
     }
 
     fn joined(j: &Job) -> String {
@@ -291,6 +356,7 @@ mod tests {
             &j,
             &Network::None,
             "1000:1000".into(),
+            None,
         )
         .unwrap()
         .join(" ");
@@ -300,6 +366,7 @@ mod tests {
             &j,
             &Network::None,
             "1000:1000".into(),
+            None,
         )
         .unwrap()
         .join(" ");
@@ -488,7 +555,9 @@ mod tests {
             workspace: ws.clone(),
             ..j
         };
-        let (mut child, network) = Backend::Container {
+        let Spawned {
+            mut child, network, ..
+        } = Backend::Container {
             image: "alpine:3.20".into(),
             cli: cli(),
         }
@@ -520,5 +589,100 @@ mod tests {
         );
         let _ = child.wait().await;
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn an_env_file_is_a_flag_before_the_image_and_no_value_reaches_the_command_line() {
+        let j = Job {
+            env: vec![("GITHUB_TOKEN".into(), "s3cret".into())],
+            ..job("true")
+        };
+        let path = std::path::Path::new("/tmp/cordon-env-x");
+        let a = container_args(
+            "podman",
+            "alpine:3.20",
+            &j,
+            &Network::None,
+            "1000:1000".into(),
+            Some(path),
+        )
+        .unwrap();
+        let flag = a
+            .iter()
+            .position(|x| x == "--env-file")
+            .expect("no --env-file");
+        assert_eq!(a[flag + 1], "/tmp/cordon-env-x");
+        assert!(
+            flag < a.iter().position(|x| x == "alpine:3.20").unwrap(),
+            "the flag came after the image"
+        );
+        assert!(
+            !a.join(" ").contains("s3cret"),
+            "a value reached the command line"
+        );
+    }
+
+    #[test]
+    fn an_env_file_is_owner_only_and_goes_with_the_job() {
+        use std::os::unix::fs::PermissionsExt;
+        let f =
+            EnvFile::write(&[("A".into(), "b c".into()), ("TOKEN".into(), "x=y".into())]).unwrap();
+        let path = f.path.clone();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "A=b c\nTOKEN=x=y\n"
+        );
+        drop(f);
+        assert!(!path.exists(), "the env file outlived its job");
+        assert!(
+            EnvFile::write(&[("A".into(), "one\nB=two".into())]).is_err(),
+            "a newline made a second variable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spawned_container_sees_its_env_and_the_env_file_goes_with_it() {
+        if !runtime_or_skip("a_spawned_container_sees_its_env_and_the_env_file_goes_with_it").await
+        {
+            return;
+        }
+        use tokio::io::AsyncReadExt;
+        let ws = std::env::temp_dir().join(format!("cordon-ctr-env-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let j = Job {
+            workspace: ws.clone(),
+            env: vec![("GREETING".into(), "hello there".into())],
+            ..job("echo \"$GREETING\"")
+        };
+        let spawned = Backend::Container {
+            image: "alpine:3.20".into(),
+            cli: cli(),
+        }
+        .spawn(&j)
+        .await
+        .unwrap();
+        let path = spawned.env_file.as_ref().unwrap().path.clone();
+        let Spawned {
+            mut child,
+            env_file,
+            ..
+        } = spawned;
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .await
+            .unwrap();
+        let _ = child.wait().await;
+        assert_eq!(out.trim(), "hello there");
+        drop(env_file);
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

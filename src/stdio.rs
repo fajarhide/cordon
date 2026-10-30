@@ -11,10 +11,9 @@ use axum::Extension;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 
 use crate::config::Config;
-use crate::exec::{Job, Limits, Network};
+use crate::exec::{Job, Limits, Spawned};
 use crate::http::ApiError;
 use crate::resolve::owner_or_error;
 use crate::run::{exec_error, network_from, pick_backend, workspace_error};
@@ -22,6 +21,9 @@ use crate::token::Scope;
 
 /// No MCP message comes near this; a line that does is stopped, not buffered without end.
 const MAX_LINE: u64 = 4 * 1024 * 1024;
+/// A server's credentials and settings, not a payload channel.
+const MAX_ENV: usize = 16;
+const MAX_ENV_VALUE: usize = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +42,10 @@ struct StdioRequest {
     memory_mb: Option<u64>,
     #[serde(default)]
     backend: Option<String>,
+    /// The job's own environment, such as a token its server needs. It reaches only the job: never a
+    /// command line, a log or the container CLI's own environment.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 pub async fn handler(
@@ -55,7 +61,7 @@ async fn serve(cfg: Arc<Config>, scope: Scope, mut socket: WebSocket) {
         Some(Ok(Message::Text(t))) => t,
         _ => return,
     };
-    let (child, network) = match start(&cfg, &scope, first.as_str()).await {
+    let spawned = match start(&cfg, &scope, first.as_str()).await {
         Ok(started) => started,
         Err(e) => {
             let mut error = json!({ "code": e.code, "message": e.message });
@@ -69,15 +75,15 @@ async fn serve(cfg: Arc<Config>, scope: Scope, mut socket: WebSocket) {
             return;
         }
     };
-    let ready = json!({ "ok": true, "network": network.label() }).to_string();
+    let ready = json!({ "ok": true, "network": spawned.network.label() }).to_string();
     if socket.send(Message::Text(ready.into())).await.is_err() {
         return;
     }
-    relay(socket, child).await;
+    relay(socket, spawned).await;
 }
 
 /// The same owner, scope, backend floor and network checks as `/v1/run`; only the wait differs.
-async fn start(cfg: &Config, scope: &Scope, first: &str) -> Result<(Child, Network), ApiError> {
+async fn start(cfg: &Config, scope: &Scope, first: &str) -> Result<Spawned, ApiError> {
     let req: StdioRequest = serde_json::from_str(first).map_err(|e| {
         ApiError::bad_request(
             "invalid_request",
@@ -96,6 +102,7 @@ async fn start(cfg: &Config, scope: &Scope, first: &str) -> Result<(Child, Netwo
             .with_detail(json!({ "max_memory_mb": cfg.max_memory_mb })))
         }
     };
+    check_env(&req.env)?;
     let backend = pick_backend(cfg, req.backend.as_deref())?;
     let network = network_from(req.network.as_deref(), &req.hosts)?;
 
@@ -114,12 +121,44 @@ async fn start(cfg: &Config, scope: &Scope, first: &str) -> Result<(Child, Netwo
         },
         network,
         unsafe_process: cfg.unsafe_process_backend,
+        env: req.env.into_iter().collect(),
     };
     backend.spawn(&job).await.map_err(exec_error)
 }
 
+/// A plain name, a bounded value, one line each, so it fits an env file and cannot become a second variable.
+fn check_env(env: &BTreeMap<String, String>) -> Result<(), ApiError> {
+    let bad = |m: String| Err(ApiError::bad_request("invalid_request", m));
+    if env.len() > MAX_ENV {
+        return bad(format!("env has more than {MAX_ENV} variables"));
+    }
+    for (k, v) in env {
+        let name_ok = !k.is_empty()
+            && k.len() <= 64
+            && k.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !name_ok {
+            return bad(format!("env name {k:?} is not a plain variable name"));
+        }
+        if v.len() > MAX_ENV_VALUE || v.contains(['\n', '\r', '\0']) {
+            return bad(format!(
+                "the value of {k} is too long or has a newline or a NUL"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Both directions until either side ends. The client leaving kills the job; the job ending closes the socket.
-async fn relay(mut socket: WebSocket, mut child: Child) {
+/// The env file goes with `spawned` when this returns.
+async fn relay(mut socket: WebSocket, spawned: Spawned) {
+    let Spawned {
+        mut child,
+        env_file: _env_file,
+        ..
+    } = spawned;
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill().await;
         return;
@@ -310,5 +349,23 @@ mod tests {
         .unwrap();
         let ready: serde_json::Value = serde_json::from_str(&text(&mut ws).await).unwrap();
         assert_eq!(ready["ok"], true, "{ready}");
+    }
+
+    #[tokio::test]
+    async fn a_stdio_job_gets_its_env_and_a_bad_name_or_value_is_refused() {
+        let f = fixture("stdio-env");
+        let url = serve(&f).await;
+        let mut ws = open(&url, None).await.unwrap();
+        let job = r#"{"owner":["acme","budi"],"entrypoint":"sh","args":["-c","echo \"$GREETING\"; cat"],"env":{"GREETING":"hello there"}}"#;
+        ws.send(Msg::Text(job.into())).await.unwrap();
+        let _ready = text(&mut ws).await;
+        assert_eq!(text(&mut ws).await, "hello there");
+        for env in [r#"{"A-B":"x"}"#, r#"{"1X":"x"}"#, r#"{"A":"one\nB=two"}"#] {
+            let mut ws = open(&url, None).await.unwrap();
+            let job = format!(r#"{{"owner":["acme","budi"],"entrypoint":"cat","env":{env}}}"#);
+            ws.send(Msg::Text(job.into())).await.unwrap();
+            let out: serde_json::Value = serde_json::from_str(&text(&mut ws).await).unwrap();
+            assert_eq!(out["error"]["code"], "invalid_request", "{env}: {out}");
+        }
     }
 }

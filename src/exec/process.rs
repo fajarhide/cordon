@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::{read_capped, ExecError, Job, Network, Outcome};
+use super::{read_capped, ExecError, Job, Network, Outcome, Spawned};
 
 pub async fn run(job: Job) -> Result<Outcome, ExecError> {
-    let (mut child, network) = spawn(&job)?;
+    let Spawned {
+        mut child, network, ..
+    } = spawn(&job)?;
     let started = Instant::now();
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -58,7 +60,7 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
 
 /// The job's process, started inside its boundary, and the network it actually got. `run` waits on it;
 /// a stdio job (`/v1/stdio`) relays it for as long as its client stays connected.
-pub fn spawn(job: &Job) -> Result<(tokio::process::Child, Network), ExecError> {
+pub fn spawn(job: &Job) -> Result<Spawned, ExecError> {
     // Shares the host network namespace, so it can give open access and never none (#1, #11).
     let network = match &job.network {
         None => Network::Open { pins: Vec::new() },
@@ -94,6 +96,7 @@ pub fn spawn(job: &Job) -> Result<(tokio::process::Child, Network), ExecError> {
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", &job.workspace)
         .env("TMPDIR", &job.workspace)
+        .envs(job.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -106,7 +109,11 @@ pub fn spawn(job: &Job) -> Result<(tokio::process::Child, Network), ExecError> {
         .map_err(|e| ExecError::Spawn(format!("spawn {}: {e}", job.entrypoint)))?;
     // The child has exec'd by the time spawn returns, so the ruleset descriptor can go.
     drop(boundary);
-    Ok((child, network))
+    Ok(Spawned {
+        child,
+        network,
+        env_file: None,
+    })
 }
 
 /// `pre_exec` runs after fork, where only async-signal-safe calls are legal: no allocation.
@@ -180,6 +187,7 @@ mod tests {
             network: None,
             // Landlock gives Linux a real boundary; elsewhere the suite runs without one.
             unsafe_process: cfg!(not(target_os = "linux")),
+            env: Vec::new(),
         }
     }
 
