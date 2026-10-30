@@ -88,6 +88,14 @@ impl Backend {
             Backend::Container { image, cli } => container::run(cli, image, job).await,
         }
     }
+
+    /// Starts the job and hands back its process instead of waiting for it.
+    pub async fn spawn(&self, job: &Job) -> Result<(tokio::process::Child, Network), ExecError> {
+        match self {
+            Backend::Process => process::spawn(job),
+            Backend::Container { image, cli } => container::spawn(cli, image, job).await,
+        }
+    }
 }
 
 /// Shared by both backends so neither buffers a job's whole output into the daemon's heap.

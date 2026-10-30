@@ -297,12 +297,13 @@ real.
 
 ## API
 
-Seven endpoints. You can adopt the first one alone and stop there.
+Eight endpoints. You can adopt the first one alone and stop there.
 
 | | |
 | --- | --- |
 | `POST /v1/resolve` | may this owner touch this path, and does it exist |
 | `POST /v1/run` | run a job in the owner's sandbox, collect its output |
+| `GET /v1/stdio` | a long-lived job over a WebSocket, one line each way, such as an MCP server |
 | `GET /v1/artifact/{token}` | fetch one collected file by token |
 | `POST /v1/fork` | copy a sandbox to a new owner, never overwriting |
 | `POST /v1/token` | issue a token scoped to an owner prefix, operator only |
@@ -404,6 +405,23 @@ and failed the container outright under rootless podman with netavark.
 A request still sending the old `egress` field is refused with
 `egress_removed` rather than translated, so a caller learns the promise changed
 instead of inheriting it.
+
+### A long-lived job over stdio
+
+`/v1/run` writes stdin once and waits for the job to end. An MCP server talks for
+as long as its client is connected, so it gets `/v1/stdio` instead: a WebSocket
+behind the same token. The first text message is the job, with the same owner,
+backend floor and network rules as a run, and `memory_mb` may lower the ceiling:
+
+```json
+{ "owner": ["acme", "budi"], "entrypoint": "node", "args": ["server.js"], "network": "none" }
+```
+
+cordon answers `{"ok":true,"network":"none"}` or the usual error body, then
+relays: each text message goes to stdin with a newline, and each stdout line
+comes back as one message. There is no wall clock; the job is killed when the
+socket closes, and the socket closes when the job ends. stderr is never relayed,
+since it can carry what the job was given. A line over 4 MB ends the job.
 
 ### One host and nothing else
 

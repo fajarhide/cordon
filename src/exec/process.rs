@@ -12,54 +12,8 @@ use tokio::process::Command;
 use super::{read_capped, ExecError, Job, Network, Outcome};
 
 pub async fn run(job: Job) -> Result<Outcome, ExecError> {
-    // Shares the host network namespace, so it can give open access and never none (#1, #11).
-    let network = match &job.network {
-        None => Network::Open { pins: Vec::new() },
-        Some(Network::Open { pins }) if pins.is_empty() => Network::Open { pins: Vec::new() },
-        Some(Network::Open { .. }) => {
-            return Err(ExecError::Unsupported(
-                "the process backend cannot pin host names for a job; use the container backend"
-                    .into(),
-            ))
-        }
-        Some(Network::None) => {
-            return Err(ExecError::Unsupported(
-                "the process backend shares the host network namespace and cannot give a job no network; use the container backend".into(),
-            ))
-        }
-    };
-
-    // Built in the parent, where allocating is safe; the child applies it with syscalls only (#1).
-    let boundary = crate::sandbox::Prepared::build(&job.workspace, &crate::sandbox::system_paths());
-    if let Some(why) = boundary.why_unavailable() {
-        if !job.unsafe_process {
-            return Err(ExecError::Unsupported(format!(
-                "refusing to run a job with no filesystem boundary: {why}. Use the container backend, or set CORDON_UNSAFE_PROCESS_BACKEND=1 if this is a development machine"
-            )));
-        }
-        eprintln!("cordon: WARNING no filesystem boundary for this job: {why}");
-    }
-
-    let mut cmd = Command::new(&job.entrypoint);
-    cmd.args(&job.args)
-        .current_dir(&job.workspace)
-        .env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("HOME", &job.workspace)
-        .env("TMPDIR", &job.workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    apply_limits(&mut cmd, &job, boundary.raw_fd());
-
+    let (mut child, network) = spawn(&job)?;
     let started = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ExecError::Spawn(format!("spawn {}: {e}", job.entrypoint)))?;
-    // The child has exec'd by the time spawn returns, so the ruleset descriptor can go.
-    drop(boundary);
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.stdin.as_bytes()).await;
@@ -100,6 +54,59 @@ pub async fn run(job: Job) -> Result<Outcome, ExecError> {
             network,
         }),
     }
+}
+
+/// The job's process, started inside its boundary, and the network it actually got. `run` waits on it;
+/// a stdio job (`/v1/stdio`) relays it for as long as its client stays connected.
+pub fn spawn(job: &Job) -> Result<(tokio::process::Child, Network), ExecError> {
+    // Shares the host network namespace, so it can give open access and never none (#1, #11).
+    let network = match &job.network {
+        None => Network::Open { pins: Vec::new() },
+        Some(Network::Open { pins }) if pins.is_empty() => Network::Open { pins: Vec::new() },
+        Some(Network::Open { .. }) => {
+            return Err(ExecError::Unsupported(
+                "the process backend cannot pin host names for a job; use the container backend"
+                    .into(),
+            ))
+        }
+        Some(Network::None) => {
+            return Err(ExecError::Unsupported(
+                "the process backend shares the host network namespace and cannot give a job no network; use the container backend".into(),
+            ))
+        }
+    };
+
+    // Built in the parent, where allocating is safe; the child applies it with syscalls only (#1).
+    let boundary = crate::sandbox::Prepared::build(&job.workspace, &crate::sandbox::system_paths());
+    if let Some(why) = boundary.why_unavailable() {
+        if !job.unsafe_process {
+            return Err(ExecError::Unsupported(format!(
+                "refusing to run a job with no filesystem boundary: {why}. Use the container backend, or set CORDON_UNSAFE_PROCESS_BACKEND=1 if this is a development machine"
+            )));
+        }
+        eprintln!("cordon: WARNING no filesystem boundary for this job: {why}");
+    }
+
+    let mut cmd = Command::new(&job.entrypoint);
+    cmd.args(&job.args)
+        .current_dir(&job.workspace)
+        .env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", &job.workspace)
+        .env("TMPDIR", &job.workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    apply_limits(&mut cmd, job, boundary.raw_fd());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| ExecError::Spawn(format!("spawn {}: {e}", job.entrypoint)))?;
+    // The child has exec'd by the time spawn returns, so the ruleset descriptor can go.
+    drop(boundary);
+    Ok((child, network))
 }
 
 /// `pre_exec` runs after fork, where only async-signal-safe calls are legal: no allocation.
