@@ -12,6 +12,7 @@ mod owner;
 mod resolve;
 mod run;
 mod sandbox;
+mod stdio;
 mod style;
 #[cfg(test)]
 mod testsupport;

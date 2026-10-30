@@ -100,6 +100,7 @@ pub fn router(cfg: Arc<Config>) -> Router {
     let guarded = Router::new()
         .route("/v1/resolve", post(crate::resolve::handler))
         .route("/v1/run", post(crate::run::handler))
+        .route("/v1/stdio", get(crate::stdio::handler))
         .route("/v1/fork", post(crate::fork::handler))
         .route("/v1/artifact/{token}", get(crate::artifact::handler))
         .route("/v1/token", post(crate::token::handler))

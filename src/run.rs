@@ -152,10 +152,18 @@ fn parse_network(req: &RunRequest) -> Result<Option<Network>, ApiError> {
             "egress was never a boundary: it blocked name resolution and left every address reachable. Use network none or open, with hosts for name pins",
         ));
     }
-    let pins = crate::exec::container::hosts::parse(req.hosts.iter())
+    network_from(req.network.as_deref(), &req.hosts)
+}
+
+/// Shared with `/v1/stdio`, so a stdio job asks for a network the same way a run does.
+pub(crate) fn network_from(
+    network: Option<&str>,
+    hosts: &std::collections::BTreeMap<String, String>,
+) -> Result<Option<Network>, ApiError> {
+    let pins = crate::exec::container::hosts::parse(hosts.iter())
         .map_err(|e| ApiError::bad_request("invalid_request", e))?;
 
-    match req.network.as_deref() {
+    match network {
         None if pins.is_empty() => Ok(None),
         None => Err(ApiError::bad_request(
             "invalid_request",
@@ -175,7 +183,7 @@ fn parse_network(req: &RunRequest) -> Result<Option<Network>, ApiError> {
 }
 
 /// The operator's backend is a floor, not a default: a request can only raise isolation (#1).
-fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> {
+pub(crate) fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend, ApiError> {
     let container = Backend::Container {
         image: cfg.image.clone(),
         cli: cfg.container_cli.clone(),
@@ -222,7 +230,7 @@ pub fn workspace_error(e: std::io::Error, owner: &Owner) -> ApiError {
 }
 
 /// A missing backend is a 503, never a silent fallback to weaker isolation.
-fn exec_error(e: ExecError) -> ApiError {
+pub(crate) fn exec_error(e: ExecError) -> ApiError {
     match e {
         ExecError::Unsupported(m) => ApiError::bad_request("backend_cannot_honour_request", m),
         ExecError::BackendUnavailable(m) => {

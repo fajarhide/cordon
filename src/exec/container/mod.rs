@@ -14,22 +14,8 @@ use super::{read_capped, ExecError, Job, Network, Outcome};
 const PIDS_LIMIT: &str = "128";
 
 pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError> {
-    // Unasked means no network; this backend can provide either.
-    let network = job.network.clone().unwrap_or_default();
-    // Built before probing the runtime, so a malformed host pin is a request error.
-    let args = container_args(cli, image, &job, &network, current_ids()?)?;
-    cli_reachable(cli).await?;
-    image_present(cli, image).await?;
-
+    let (mut child, network) = spawn(cli, image, &job).await?;
     let started = Instant::now();
-    let mut child = Command::new(cli)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| ExecError::BackendUnavailable(format!("{cli}: {e}")))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(job.stdin.as_bytes()).await;
@@ -69,6 +55,30 @@ pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError>
             network,
         }),
     }
+}
+
+/// The job's container, started, and the network it actually got. `run` waits on it; a stdio job
+/// (`/v1/stdio`) relays it for as long as its client stays connected.
+pub async fn spawn(
+    cli: &str,
+    image: &str,
+    job: &Job,
+) -> Result<(tokio::process::Child, Network), ExecError> {
+    // Unasked means no network; this backend can provide either.
+    let network = job.network.clone().unwrap_or_default();
+    // Built before probing the runtime, so a malformed host pin is a request error.
+    let args = container_args(cli, image, job, &network, current_ids()?)?;
+    cli_reachable(cli).await?;
+    image_present(cli, image).await?;
+    let child = Command::new(cli)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| ExecError::BackendUnavailable(format!("{cli}: {e}")))?;
+    Ok((child, network))
 }
 
 /// The daemon's own uid:gid, not `nobody`, which cannot write the daemon-owned bind mount.
@@ -456,5 +466,59 @@ mod tests {
             out.stdout
         );
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The path `/v1/stdio` takes: started, fed a line, read back, with no network and nothing past its workspace.
+    #[tokio::test]
+    async fn a_spawned_container_answers_on_stdout_and_still_has_no_network_or_outside_view() {
+        if !runtime_or_skip(
+            "a_spawned_container_answers_on_stdout_and_still_has_no_network_or_outside_view",
+        )
+        .await
+        {
+            return;
+        }
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let parent = std::env::temp_dir().join(format!("cordon-ctr-stdio-{}", std::process::id()));
+        let ws = parent.join("owner");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(parent.join("next-to-the-workspace.db"), b"secret").unwrap();
+        let j = job("read l; echo got:$l; ls -a / /workspace | tr '\\n' ' '; echo; wget -q -T 3 -O - https://example.com || echo BLOCKED");
+        let j = Job {
+            workspace: ws.clone(),
+            ..j
+        };
+        let (mut child, network) = Backend::Container {
+            image: "alpine:3.20".into(),
+            cli: cli(),
+        }
+        .spawn(&j)
+        .await
+        .unwrap();
+        assert_eq!(network, Network::None);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello\n")
+            .await
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut seen = String::new();
+        while let Ok(Some(l)) = lines.next_line().await {
+            seen.push_str(&l);
+            seen.push('\n');
+        }
+        assert!(seen.contains("got:hello"), "no answer on stdout: {seen}");
+        assert!(
+            seen.contains("BLOCKED"),
+            "the container reached the network: {seen}"
+        );
+        assert!(
+            !seen.contains("next-to-the-workspace.db"),
+            "a file outside the workspace showed: {seen}"
+        );
+        let _ = child.wait().await;
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
