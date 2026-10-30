@@ -76,6 +76,7 @@ pub async fn handler(
             limits,
             network,
             unsafe_process: cfg.unsafe_process_backend,
+            env: Vec::new(),
         })
         .await
         .map_err(exec_error)?;

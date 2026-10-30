@@ -417,6 +417,12 @@ backend floor and network rules as a run, and `memory_mb` may lower the ceiling:
 { "owner": ["acme", "budi"], "entrypoint": "node", "args": ["server.js"], "network": "none" }
 ```
 
+`env` gives the job up to 16 variables, such as a token its server needs. The
+values go into an owner-only file passed as `--env-file` and removed with the
+job, so they are never on a command line, in a log, or in the container CLI's
+own environment, where a name like `CONTAINERS_CONF` would steer the runtime.
+A name must be a plain variable name and a value a single line.
+
 cordon answers `{"ok":true,"network":"none"}` or the usual error body, then
 relays: each text message goes to stdin with a newline, and each stdout line
 comes back as one message. There is no wall clock; the job is killed when the

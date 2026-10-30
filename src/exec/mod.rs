@@ -44,6 +44,17 @@ pub struct Job {
     pub network: Option<Network>,
     /// Process backend only: decides whether a missing filesystem boundary is fatal.
     pub unsafe_process: bool,
+    /// The job's own environment. Never on a command line, and never in the container CLI's environment,
+    /// where a name like `CONTAINERS_CONF` would steer the runtime itself.
+    pub env: Vec<(String, String)>,
+}
+
+/// A started job. The env file, when there is one, lives as long as this does.
+pub struct Spawned {
+    pub child: tokio::process::Child,
+    /// What the job actually got, which is not always what it asked for.
+    pub network: Network,
+    pub env_file: Option<container::EnvFile>,
 }
 
 #[derive(Debug)]
@@ -90,7 +101,7 @@ impl Backend {
     }
 
     /// Starts the job and hands back its process instead of waiting for it.
-    pub async fn spawn(&self, job: &Job) -> Result<(tokio::process::Child, Network), ExecError> {
+    pub async fn spawn(&self, job: &Job) -> Result<Spawned, ExecError> {
         match self {
             Backend::Process => process::spawn(job),
             Backend::Container { image, cli } => container::spawn(cli, image, job).await,
