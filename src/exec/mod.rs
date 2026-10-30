@@ -89,14 +89,24 @@ impl fmt::Display for ExecError {
 
 pub enum Backend {
     Process,
-    Container { image: String, cli: String },
+    /// env_dir holds a job's env file: under cordon's root, never the temp dir. A rootless runtime re-enters its own
+    /// namespaces, where a service's private /tmp is not the one cordon wrote to.
+    Container {
+        image: String,
+        cli: String,
+        env_dir: PathBuf,
+    },
 }
 
 impl Backend {
     pub async fn run(&self, job: Job) -> Result<Outcome, ExecError> {
         match self {
             Backend::Process => process::run(job).await,
-            Backend::Container { image, cli } => container::run(cli, image, job).await,
+            Backend::Container {
+                image,
+                cli,
+                env_dir,
+            } => container::run(cli, image, env_dir, job).await,
         }
     }
 
@@ -104,7 +114,11 @@ impl Backend {
     pub async fn spawn(&self, job: &Job) -> Result<Spawned, ExecError> {
         match self {
             Backend::Process => process::spawn(job),
-            Backend::Container { image, cli } => container::spawn(cli, image, job).await,
+            Backend::Container {
+                image,
+                cli,
+                env_dir,
+            } => container::spawn(cli, image, env_dir, job).await,
         }
     }
 }
