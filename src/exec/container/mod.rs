@@ -13,12 +13,17 @@ use super::{read_capped, ExecError, Job, Network, Outcome, Spawned};
 
 const PIDS_LIMIT: &str = "128";
 
-pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError> {
+pub async fn run(
+    cli: &str,
+    image: &str,
+    env_dir: &std::path::Path,
+    job: Job,
+) -> Result<Outcome, ExecError> {
     let Spawned {
         mut child,
         network,
         env_file: _env_file,
-    } = spawn(cli, image, &job).await?;
+    } = spawn(cli, image, env_dir, &job).await?;
     let started = Instant::now();
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -63,14 +68,19 @@ pub async fn run(cli: &str, image: &str, job: Job) -> Result<Outcome, ExecError>
 
 /// The job's container, started, and the network it actually got. `run` waits on it; a stdio job
 /// (`/v1/stdio`) relays it for as long as its client stays connected.
-pub async fn spawn(cli: &str, image: &str, job: &Job) -> Result<Spawned, ExecError> {
+pub async fn spawn(
+    cli: &str,
+    image: &str,
+    env_dir: &std::path::Path,
+    job: &Job,
+) -> Result<Spawned, ExecError> {
     // Unasked means no network; this backend can provide either.
     let network = job.network.clone().unwrap_or_default();
     // Built before probing the runtime, so a malformed host pin is a request error.
     let env_file = if job.env.is_empty() {
         None
     } else {
-        Some(EnvFile::write(&job.env)?)
+        Some(EnvFile::write(&job.env, env_dir)?)
     };
     let args = container_args(
         cli,
@@ -104,9 +114,9 @@ pub struct EnvFile {
 }
 
 impl EnvFile {
-    fn write(env: &[(String, String)]) -> Result<Self, ExecError> {
+    fn write(env: &[(String, String)], dir: &std::path::Path) -> Result<Self, ExecError> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut body = String::new();
         for (k, v) in env {
             // One line per variable in an env file: a newline would start a second one.
@@ -120,7 +130,10 @@ impl EnvFile {
         let mut rand = [0u8; 12];
         getrandom::fill(&mut rand).map_err(|e| ExecError::Spawn(format!("random: {e}")))?;
         let name: String = rand.iter().map(|b| format!("{b:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("cordon-env-{name}"));
+        std::fs::create_dir_all(dir).map_err(|e| ExecError::Spawn(format!("env dir: {e}")))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| ExecError::Spawn(format!("env dir: {e}")))?;
+        let path = dir.join(format!("cordon-env-{name}"));
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -458,6 +471,7 @@ mod tests {
         let err = Backend::Container {
             image: "alpine:3.20".into(),
             cli: "cordon-no-such-runtime".into(),
+            env_dir: test_env_dir(),
         }
         .run(job("true"))
         .await
@@ -466,6 +480,10 @@ mod tests {
             matches!(err, ExecError::BackendUnavailable(_)),
             "got {err:?}"
         );
+    }
+
+    fn test_env_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("cordon-test-env-{}", std::process::id()))
     }
 
     async fn runtime_or_skip(test: &str) -> bool {
@@ -494,6 +512,7 @@ mod tests {
         let out = Backend::Container {
             image: "alpine:3.20".into(),
             cli: cli(),
+            env_dir: test_env_dir(),
         }
         .run(j)
         .await
@@ -523,6 +542,7 @@ mod tests {
         let out = Backend::Container {
             image: "alpine:3.20".into(),
             cli: cli(),
+            env_dir: test_env_dir(),
         }
         .run(j)
         .await
@@ -560,6 +580,7 @@ mod tests {
         } = Backend::Container {
             image: "alpine:3.20".into(),
             cli: cli(),
+            env_dir: test_env_dir(),
         }
         .spawn(&j)
         .await
@@ -625,9 +646,22 @@ mod tests {
     #[test]
     fn an_env_file_is_owner_only_and_goes_with_the_job() {
         use std::os::unix::fs::PermissionsExt;
-        let f =
-            EnvFile::write(&[("A".into(), "b c".into()), ("TOKEN".into(), "x=y".into())]).unwrap();
+        let f = EnvFile::write(
+            &[("A".into(), "b c".into()), ("TOKEN".into(), "x=y".into())],
+            &test_env_dir(),
+        )
+        .unwrap();
         let path = f.path.clone();
+        // under the dir cordon gives it, not the temp dir a service may have privately (#27)
+        assert!(path.starts_with(test_env_dir()), "{}", path.display());
+        assert_eq!(
+            std::fs::metadata(test_env_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
@@ -639,7 +673,7 @@ mod tests {
         drop(f);
         assert!(!path.exists(), "the env file outlived its job");
         assert!(
-            EnvFile::write(&[("A".into(), "one\nB=two".into())]).is_err(),
+            EnvFile::write(&[("A".into(), "one\nB=two".into())], &test_env_dir()).is_err(),
             "a newline made a second variable"
         );
     }
@@ -661,6 +695,7 @@ mod tests {
         let spawned = Backend::Container {
             image: "alpine:3.20".into(),
             cli: cli(),
+            env_dir: test_env_dir(),
         }
         .spawn(&j)
         .await

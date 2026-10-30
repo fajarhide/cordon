@@ -188,6 +188,7 @@ pub(crate) fn pick_backend(cfg: &Config, asked: Option<&str>) -> Result<Backend,
     let container = Backend::Container {
         image: cfg.image.clone(),
         cli: cfg.container_cli.clone(),
+        env_dir: cfg.root.join("env"),
     };
     match (cfg.backend.as_str(), asked) {
         (_, Some("container")) => Ok(container),
