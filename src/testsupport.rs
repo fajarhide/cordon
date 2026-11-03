@@ -54,6 +54,8 @@ fn build(tag: &str, token: Option<String>) -> Fixture {
         artifact_ttl: std::time::Duration::from_secs(3600),
         max_wall_ms: 10_000,
         max_memory_mb: 256,
+        max_file_mb: 1,
+        owner_quota_mb: 2,
         // The boundary exists on Linux only, so the suite runs without it elsewhere.
         unsafe_process_backend: cfg!(not(target_os = "linux")),
     });
@@ -153,4 +155,28 @@ pub async fn get_auth(f: &Fixture, uri: &str, auth: Option<&str>) -> (StatusCode
         .await
         .expect("read body");
     (status, bytes.to_vec())
+}
+
+/// Any method with a body and headers, answering status, raw body and headers.
+pub async fn request(
+    f: &Fixture,
+    method: &str,
+    uri: &str,
+    body: Vec<u8>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
+    let mut b = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    let res = crate::http::router(Arc::clone(&f.cfg))
+        .oneshot(b.body(Body::from(body)).expect("build request"))
+        .await
+        .expect("router answered");
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = axum::body::to_bytes(res.into_body(), 8 * 1024 * 1024)
+        .await
+        .expect("read body");
+    (status, bytes.to_vec(), headers)
 }

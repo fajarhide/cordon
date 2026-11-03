@@ -2,9 +2,11 @@
 #![deny(unsafe_code)]
 
 mod artifact;
+mod beneath;
 mod config;
 mod demo;
 mod exec;
+mod files;
 mod fork;
 mod guard;
 mod http;
@@ -12,6 +14,7 @@ mod owner;
 mod resolve;
 mod run;
 mod sandbox;
+mod sha256;
 mod stdio;
 mod style;
 #[cfg(test)]

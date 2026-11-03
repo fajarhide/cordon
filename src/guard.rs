@@ -93,6 +93,22 @@ impl Guard {
     }
 }
 
+/// A path for the file endpoints, as plain components inside the owner's own workspace.
+/// The same refusals as `resolve`, and no `..` at all: inherit is a job's view, not a file API's.
+pub fn components(rel: &str) -> Result<Vec<&str>, GuardError> {
+    if rel.starts_with('/') || Path::new(rel).is_absolute() {
+        return Err(GuardError::Absolute(rel.into()));
+    }
+    if rel.is_empty() || rel.contains('\0') || rel.contains('%') || rel.contains('\\') {
+        return Err(GuardError::Escapes(rel.into()));
+    }
+    let parts: Vec<&str> = rel.split('/').collect();
+    if parts.iter().any(|c| matches!(*c, "" | "." | "..")) {
+        return Err(GuardError::Escapes(rel.into()));
+    }
+    Ok(parts)
+}
+
 /// `..` is a step up the ownership tree, not a traversal, so it is only valid as a prefix.
 /// A later `..`, any `.` and an empty component are refused, never normalised.
 fn split_hops(rel: &str) -> Option<(usize, Vec<&str>)> {

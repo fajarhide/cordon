@@ -306,6 +306,8 @@ Eight endpoints. You can adopt the first one alone and stop there.
 | `GET /v1/stdio` | a long-lived job over a WebSocket, one line each way, such as an MCP server |
 | `GET /v1/artifact/{token}` | fetch one collected file by token |
 | `POST /v1/fork` | copy a sandbox to a new owner, never overwriting |
+| `GET /v1/files` | list an owner's files with size, and sha256 with `hash=true` |
+| `GET` `PUT` `DELETE /v1/file` | read, write or delete one file without starting a job; `If-Match` takes a sha256 |
 | `POST /v1/token` | issue a token scoped to an owner prefix, operator only |
 | `DELETE /v1/token/{token}` | revoke one, operator only |
 | `GET /v1/health` | liveness |
@@ -492,10 +494,15 @@ on prose.
 | `artifact_not_found` | 404 | unknown token, wrong owner, expired, or no owner given |
 | `destination_exists` | 409 | a fork would overwrite a workspace |
 | `source_not_found` | 404 | the owner being forked has no workspace |
+| `file_not_found` | 404 | no regular file at that path |
+| `not_a_file` | 409 | the path is a folder, a FIFO or another non file |
+| `file_changed` | 412 | `If-Match` named a hash the file no longer has |
+| `file_too_large` | 413 | over `CORDON_MAX_FILE_MB` |
+| `quota_exceeded` | 413 | the write would take the owner past `CORDON_OWNER_QUOTA_MB` |
 
-Four codes are 5xx and each one means the daemon rather than the request:
+Five codes are 5xx and each one means the daemon rather than the request:
 `workspace_unavailable`, `fork_failed`, `artifact_mint_failed`,
-`token_issue_failed`. A full disk, a
+`token_issue_failed`, `io_error`. A full disk, a
 read-only filesystem, a permission problem on `CORDON_ROOT`. Nothing a caller
 sends should produce one, and if it does, that is a bug worth an issue.
 
@@ -761,6 +768,8 @@ stronger backend than the operator configured and never a weaker one.
 | `CORDON_ARTIFACT_TTL` | `24h` | `s`, `m`, `h` or `d`. Expired records are deleted at startup and every hour after |
 | `CORDON_MAX_WALL_MS` | `60000` | ceiling a request may lower, never raise |
 | `CORDON_MAX_MEMORY_MB` | `1024` | same |
+| `CORDON_MAX_FILE_MB` | `100` | the largest file `/v1/file` reads or writes |
+| `CORDON_OWNER_QUOTA_MB` | `2048` | what one owner may hold, checked on each `/v1/file` write. A job's own writes are not counted |
 | `CORDON_SYSTEM_PATHS` | `/usr:/bin:/sbin:/lib:/lib64:/etc:/dev/null:/dev/urandom:/dev/zero` | read and execute inside the Landlock boundary. Never add `/tmp` or `/var`: `CORDON_ROOT` usually lives under one |
 | `CORDON_UNSAFE_PROCESS_BACKEND` | unset | `1` lets the process backend run with no boundary. Development only, and every such job says so on its stderr |
 
