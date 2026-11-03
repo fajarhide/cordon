@@ -306,8 +306,9 @@ Eight endpoints. You can adopt the first one alone and stop there.
 | `GET /v1/stdio` | a long-lived job over a WebSocket, one line each way, such as an MCP server |
 | `GET /v1/artifact/{token}` | fetch one collected file by token |
 | `POST /v1/fork` | copy a sandbox to a new owner, never overwriting |
-| `GET /v1/files` | list an owner's files with size, and sha256 with `hash=true` |
+| `GET /v1/files` | list an owner's files with size, and sha256 with `hash=true`; a `path` naming a file lists that one |
 | `GET` `PUT` `DELETE /v1/file` | read, write or delete one file without starting a job; `If-Match` takes a sha256 |
+| `POST /v1/copy` | copy files between two owners without the bytes leaving the daemon |
 | `POST /v1/token` | issue a token scoped to an owner prefix, operator only |
 | `DELETE /v1/token/{token}` | revoke one, operator only |
 | `GET /v1/health` | liveness |
