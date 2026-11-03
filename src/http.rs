@@ -104,6 +104,7 @@ pub fn router(cfg: Arc<Config>) -> Router {
         .route("/v1/fork", post(crate::fork::handler))
         .route("/v1/artifact/{token}", get(crate::artifact::handler))
         .route("/v1/files", get(crate::files::list))
+        .route("/v1/copy", post(crate::files::copy))
         .route(
             "/v1/file",
             get(crate::files::read)
