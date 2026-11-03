@@ -17,6 +17,8 @@ pub const KEYS: &[&str] = &[
     "CORDON_ARTIFACT_TTL",
     "CORDON_MAX_WALL_MS",
     "CORDON_MAX_MEMORY_MB",
+    "CORDON_MAX_FILE_MB",
+    "CORDON_OWNER_QUOTA_MB",
     "CORDON_UNSAFE_PROCESS_BACKEND",
 ];
 
@@ -32,6 +34,10 @@ pub struct Config {
     pub artifact_ttl: Duration,
     pub max_wall_ms: u64,
     pub max_memory_mb: u64,
+    /// The largest file the file endpoints read or write, in MB.
+    pub max_file_mb: u64,
+    /// Bytes an owner may hold through the file endpoints, in MB. Jobs are not counted against it.
+    pub owner_quota_mb: u64,
     /// Process backend with no filesystem boundary, for development: only Linux has landlock.
     pub unsafe_process_backend: bool,
 }
@@ -48,6 +54,8 @@ impl Config {
             artifact_ttl: parse_duration(&env("CORDON_ARTIFACT_TTL", "24h"))?,
             max_wall_ms: env_u64("CORDON_MAX_WALL_MS", 60_000),
             max_memory_mb: env_u64("CORDON_MAX_MEMORY_MB", 1024),
+            max_file_mb: env_u64("CORDON_MAX_FILE_MB", 100),
+            owner_quota_mb: env_u64("CORDON_OWNER_QUOTA_MB", 2048),
             unsafe_process_backend: std::env::var("CORDON_UNSAFE_PROCESS_BACKEND").as_deref()
                 == Ok("1"),
         };

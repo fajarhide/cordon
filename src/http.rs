@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -103,6 +103,17 @@ pub fn router(cfg: Arc<Config>) -> Router {
         .route("/v1/stdio", get(crate::stdio::handler))
         .route("/v1/fork", post(crate::fork::handler))
         .route("/v1/artifact/{token}", get(crate::artifact::handler))
+        .route("/v1/files", get(crate::files::list))
+        .route(
+            "/v1/file",
+            get(crate::files::read)
+                // One byte over the cap, so the handler refuses it in cordon's shape and not axum's.
+                .put(crate::files::write)
+                .layer(DefaultBodyLimit::max(
+                    (cfg.max_file_mb * 1024 * 1024 + 1) as usize,
+                ))
+                .delete(crate::files::remove),
+        )
         .route("/v1/token", post(crate::token::handler))
         .route("/v1/token/{token}", delete(crate::token::revoke))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -183,6 +194,8 @@ mod tests {
             artifact_ttl: std::time::Duration::from_secs(60),
             max_wall_ms: 5_000,
             max_memory_mb: 128,
+            max_file_mb: 1,
+            owner_quota_mb: 2,
             // The boundary exists on Linux only, so the suite runs without it elsewhere.
             unsafe_process_backend: cfg!(not(target_os = "linux")),
         })
